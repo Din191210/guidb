@@ -128,14 +128,17 @@ async fn ensure_catalog_schema(pool: &SqlitePool) -> anyhow::Result<()> {
         .fetch_all(pool)
         .await
         .unwrap_or_default();
-    let has_protection = cols
-        .iter()
-        .any(|r| r.try_get::<String, _>("name").is_ok_and(|n| n == "protection_mode"));
+    let has_protection = cols.iter().any(|r| {
+        r.try_get::<String, _>("name")
+            .is_ok_and(|n| n == "protection_mode")
+    });
     if !has_protection {
-        sqlx::query("ALTER TABLE connections ADD COLUMN protection_mode TEXT NOT NULL DEFAULT 'safe_guard'")
-            .execute(pool)
-            .await
-            .context("Failed migrating connections.protection_mode")?;
+        sqlx::query(
+            "ALTER TABLE connections ADD COLUMN protection_mode TEXT NOT NULL DEFAULT 'safe_guard'",
+        )
+        .execute(pool)
+        .await
+        .context("Failed migrating connections.protection_mode")?;
     }
 
     Ok(())
@@ -718,10 +721,14 @@ pub async fn create_connection(
     let name = req.name.trim().to_string();
     let target = req.target.trim().to_string();
     if name.is_empty() {
-        return Err(AppError::BadRequest("Connection name cannot be empty".into()));
+        return Err(AppError::BadRequest(
+            "Connection name cannot be empty".into(),
+        ));
     }
     if target.is_empty() {
-        return Err(AppError::BadRequest("Connection target / URI cannot be empty".into()));
+        return Err(AppError::BadRequest(
+            "Connection target / URI cannot be empty".into(),
+        ));
     }
 
     // Initialize local storage for local SQLite / Document / KV files if target is a local file path

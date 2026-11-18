@@ -171,7 +171,12 @@ impl CellValue {
                 return CellValue::Int(i);
             }
         }
-        if upper.contains("REAL") || upper.contains("FLOAT") || upper.contains("DOUBLE") || upper.contains("NUMERIC") || upper.contains("DECIMAL") {
+        if upper.contains("REAL")
+            || upper.contains("FLOAT")
+            || upper.contains("DOUBLE")
+            || upper.contains("NUMERIC")
+            || upper.contains("DECIMAL")
+        {
             if let Ok(f) = trimmed.parse::<f64>() {
                 return CellValue::Float(f);
             }

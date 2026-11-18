@@ -532,7 +532,9 @@ impl DatabaseAdapter for SqliteAdapter {
             } => {
                 let valid_table = validate_identifier(&table_name).map_err(AppError::BadRequest)?;
                 if columns.is_empty() {
-                    return Err(AppError::BadRequest("At least one column is required".into()));
+                    return Err(AppError::BadRequest(
+                        "At least one column is required".into(),
+                    ));
                 }
                 let mut col_defs = Vec::with_capacity(columns.len());
                 for c in columns {
@@ -547,7 +549,12 @@ impl DatabaseAdapter for SqliteAdapter {
                     } else if !c.nullable {
                         def.push_str(" NOT NULL");
                     }
-                    if let Some(d) = c.default_value.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    if let Some(d) = c
+                        .default_value
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
                         def.push_str(&format!(" DEFAULT {}", sanitize_default(d)));
                     }
                     col_defs.push(def);
@@ -612,11 +619,17 @@ impl DatabaseAdapter for SqliteAdapter {
             }
             DdlAction::TruncateItem { item_name } => {
                 let valid_table = validate_identifier(&item_name).map_err(AppError::BadRequest)?;
-                format!("DELETE FROM {};", quote_ident(&valid_table, EngineKind::Sqlite))
+                format!(
+                    "DELETE FROM {};",
+                    quote_ident(&valid_table, EngineKind::Sqlite)
+                )
             }
             DdlAction::DropItem { item_name } => {
                 let valid_table = validate_identifier(&item_name).map_err(AppError::BadRequest)?;
-                format!("DROP TABLE {};", quote_ident(&valid_table, EngineKind::Sqlite))
+                format!(
+                    "DROP TABLE {};",
+                    quote_ident(&valid_table, EngineKind::Sqlite)
+                )
             }
         };
 
@@ -658,8 +671,18 @@ impl DatabaseAdapter for SqliteAdapter {
 fn validate_sql_type(raw: &str) -> AppResult<String> {
     let trimmed = raw.trim().to_uppercase();
     let allowed = [
-        "INTEGER", "INT", "BIGINT", "TEXT", "VARCHAR(255)", "REAL", "FLOAT", "NUMERIC",
-        "BOOLEAN", "BLOB", "TIMESTAMP", "JSON",
+        "INTEGER",
+        "INT",
+        "BIGINT",
+        "TEXT",
+        "VARCHAR(255)",
+        "REAL",
+        "FLOAT",
+        "NUMERIC",
+        "BOOLEAN",
+        "BLOB",
+        "TIMESTAMP",
+        "JSON",
     ];
     if allowed.contains(&trimmed.as_str())
         || (trimmed
@@ -670,7 +693,9 @@ fn validate_sql_type(raw: &str) -> AppResult<String> {
     {
         Ok(trimmed)
     } else {
-        Err(AppError::BadRequest(format!("Unsupported data type '{raw}'")))
+        Err(AppError::BadRequest(format!(
+            "Unsupported data type '{raw}'"
+        )))
     }
 }
 

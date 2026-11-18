@@ -220,7 +220,13 @@ impl DatabaseAdapter for PostgresAdapter {
             .map(|c| {
                 let nn = if !c.nullable { " NOT NULL" } else { "" };
                 let pk = if c.is_pk { " PRIMARY KEY" } else { "" };
-                format!("  {} {}{}{}", quote_ident(&c.name, EngineKind::Postgres), c.data_type, pk, nn)
+                format!(
+                    "  {} {}{}{}",
+                    quote_ident(&c.name, EngineKind::Postgres),
+                    c.data_type,
+                    pk,
+                    nn
+                )
             })
             .collect();
         let ddl = format!(
@@ -262,7 +268,12 @@ impl DatabaseAdapter for PostgresAdapter {
         let where_clause = if filter_pat.is_some() && !col_names.is_empty() {
             let preds: Vec<String> = col_names
                 .iter()
-                .map(|c| format!("CAST({} AS TEXT) ILIKE $1", quote_ident(c, EngineKind::Postgres)))
+                .map(|c| {
+                    format!(
+                        "CAST({} AS TEXT) ILIKE $1",
+                        quote_ident(c, EngineKind::Postgres)
+                    )
+                })
                 .collect();
             format!(" WHERE ({})", preds.join(" OR "))
         } else {
@@ -333,7 +344,11 @@ impl DatabaseAdapter for PostgresAdapter {
         let start = Instant::now();
         let trimmed = query.trim();
         let upper = trimmed.to_uppercase();
-        if upper.starts_with("SELECT") || upper.starts_with("WITH") || upper.starts_with("EXPLAIN") || upper.starts_with("SHOW") {
+        if upper.starts_with("SELECT")
+            || upper.starts_with("WITH")
+            || upper.starts_with("EXPLAIN")
+            || upper.starts_with("SHOW")
+        {
             let rows_raw = sqlx::query(trimmed)
                 .fetch_all(&self.pool)
                 .await
@@ -425,16 +440,25 @@ impl DatabaseAdapter for PostgresAdapter {
                     let mut sets = Vec::new();
                     for c in changes.keys() {
                         let vc = validate_identifier(c).map_err(AppError::BadRequest)?;
-                        sets.push(format!("{} = ${idx}", quote_ident(&vc, EngineKind::Postgres)));
+                        sets.push(format!(
+                            "{} = ${idx}",
+                            quote_ident(&vc, EngineKind::Postgres)
+                        ));
                         idx += 1;
                     }
                     let mut wheres = Vec::new();
                     for (c, v) in pk_match {
                         let vc = validate_identifier(c).map_err(AppError::BadRequest)?;
                         if matches!(v, CellValue::Null) {
-                            wheres.push(format!("{} IS NULL", quote_ident(&vc, EngineKind::Postgres)));
+                            wheres.push(format!(
+                                "{} IS NULL",
+                                quote_ident(&vc, EngineKind::Postgres)
+                            ));
                         } else {
-                            wheres.push(format!("{} = ${idx}", quote_ident(&vc, EngineKind::Postgres)));
+                            wheres.push(format!(
+                                "{} = ${idx}",
+                                quote_ident(&vc, EngineKind::Postgres)
+                            ));
                             idx += 1;
                         }
                     }
@@ -464,9 +488,15 @@ impl DatabaseAdapter for PostgresAdapter {
                     for (c, v) in pk_match {
                         let vc = validate_identifier(c).map_err(AppError::BadRequest)?;
                         if matches!(v, CellValue::Null) {
-                            wheres.push(format!("{} IS NULL", quote_ident(&vc, EngineKind::Postgres)));
+                            wheres.push(format!(
+                                "{} IS NULL",
+                                quote_ident(&vc, EngineKind::Postgres)
+                            ));
                         } else {
-                            wheres.push(format!("{} = ${idx}", quote_ident(&vc, EngineKind::Postgres)));
+                            wheres.push(format!(
+                                "{} = ${idx}",
+                                quote_ident(&vc, EngineKind::Postgres)
+                            ));
                             idx += 1;
                         }
                     }
@@ -507,7 +537,8 @@ impl DatabaseAdapter for PostgresAdapter {
                 let mut defs = Vec::new();
                 for c in columns {
                     let vc = validate_identifier(&c.name).map_err(AppError::BadRequest)?;
-                    let mut line = format!("{} {}", quote_ident(&vc, EngineKind::Postgres), c.data_type);
+                    let mut line =
+                        format!("{} {}", quote_ident(&vc, EngineKind::Postgres), c.data_type);
                     if c.is_pk {
                         line.push_str(" PRIMARY KEY");
                     } else if !c.nullable {

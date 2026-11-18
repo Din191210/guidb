@@ -31,7 +31,11 @@ fn StudioIcon(kind: &'static str) -> impl IntoView {
 }
 
 #[component]
-fn StudioShell(initial_json: String, active_conn_name: String, active_item_name: String) -> impl IntoView {
+fn StudioShell(
+    initial_json: String,
+    active_conn_name: String,
+    active_item_name: String,
+) -> impl IntoView {
     view! {
         <html lang="id">
             <head>

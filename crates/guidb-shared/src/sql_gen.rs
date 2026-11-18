@@ -19,7 +19,9 @@ pub fn validate_identifier(ident: &str) -> Result<String, String> {
     }
     let first = trimmed.chars().next().ok_or("Empty identifier")?;
     if !(first.is_ascii_alphabetic() || first == '_') {
-        return Err(format!("Identifier '{trimmed}' must start with a letter or '_'"));
+        return Err(format!(
+            "Identifier '{trimmed}' must start with a letter or '_'"
+        ));
     }
     if !trimmed
         .chars()
@@ -148,7 +150,9 @@ pub fn preview_mutations(mutations: &[StagedMutation], engine: EngineKind) -> Ve
                 } => {
                     let sets: Vec<String> = changes
                         .iter()
-                        .map(|(k, v)| format!("{} = {}", quote_ident(k, engine), format_sql_literal(v)))
+                        .map(|(k, v)| {
+                            format!("{} = {}", quote_ident(k, engine), format_sql_literal(v))
+                        })
                         .collect();
                     let wheres: Vec<String> = pk_match
                         .iter()
@@ -236,11 +240,54 @@ pub fn format_sql(input: &str) -> String {
         "SET",
     ];
     let keywords = [
-        "SELECT", "FROM", "WHERE", "AND", "OR", "AS", "ON", "IN", "IS", "NOT", "NULL", "JOIN",
-        "LEFT", "RIGHT", "INNER", "CROSS", "GROUP", "BY", "HAVING", "ORDER", "ASC", "DESC",
-        "LIMIT", "OFFSET", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE",
-        "TABLE", "ALTER", "DROP", "INDEX", "UNIQUE", "PRIMARY", "KEY", "FOREIGN", "REFERENCES",
-        "EXPLAIN", "QUERY", "PLAN", "COUNT", "SUM", "AVG", "MIN", "MAX",
+        "SELECT",
+        "FROM",
+        "WHERE",
+        "AND",
+        "OR",
+        "AS",
+        "ON",
+        "IN",
+        "IS",
+        "NOT",
+        "NULL",
+        "JOIN",
+        "LEFT",
+        "RIGHT",
+        "INNER",
+        "CROSS",
+        "GROUP",
+        "BY",
+        "HAVING",
+        "ORDER",
+        "ASC",
+        "DESC",
+        "LIMIT",
+        "OFFSET",
+        "INSERT",
+        "INTO",
+        "VALUES",
+        "UPDATE",
+        "SET",
+        "DELETE",
+        "CREATE",
+        "TABLE",
+        "ALTER",
+        "DROP",
+        "INDEX",
+        "UNIQUE",
+        "PRIMARY",
+        "KEY",
+        "FOREIGN",
+        "REFERENCES",
+        "EXPLAIN",
+        "QUERY",
+        "PLAN",
+        "COUNT",
+        "SUM",
+        "AVG",
+        "MIN",
+        "MAX",
     ];
 
     let tokens = tokenize_sql(trimmed);
@@ -419,9 +466,12 @@ mod tests {
 
     #[test]
     fn format_sql_preserves_literals_and_breaks_clauses() {
-        let formatted = format_sql("select id, name from customers where status = 'active' order by id desc limit 25;");
+        let formatted = format_sql(
+            "select id, name from customers where status = 'active' order by id desc limit 25;",
+        );
         assert!(formatted.contains("SELECT"));
-        assert!(formatted.contains("\nFROM customers\nWHERE status = 'active'\nORDER BY id DESC\nLIMIT 25;"));
+        assert!(formatted
+            .contains("\nFROM customers\nWHERE status = 'active'\nORDER BY id DESC\nLIMIT 25;"));
     }
 
     #[test]

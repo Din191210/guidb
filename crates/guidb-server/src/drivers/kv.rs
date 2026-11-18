@@ -209,15 +209,25 @@ impl DatabaseAdapter for KvAdapter {
     async fn fetch_item_data(&self, item: &str, opts: DataQueryOptions) -> AppResult<QueryResult> {
         let start = Instant::now();
         if self.target.starts_with("redis://") {
-            let pattern = if item.is_empty() || item == "*" { "*" } else { item };
+            let pattern = if item.is_empty() || item == "*" {
+                "*"
+            } else {
+                item
+            };
             let raw = send_resp_command(&self.target, &["KEYS", pattern]).await?;
             let keys: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
             let mut rows = Vec::new();
             for k in keys.into_iter().take(opts.limit.clamp(1, 200) as usize) {
-                let typ = send_resp_command(&self.target, &["TYPE", &k]).await.unwrap_or_default();
-                let ttl_str = send_resp_command(&self.target, &["TTL", &k]).await.unwrap_or_else(|_| "-1".into());
+                let typ = send_resp_command(&self.target, &["TYPE", &k])
+                    .await
+                    .unwrap_or_default();
+                let ttl_str = send_resp_command(&self.target, &["TTL", &k])
+                    .await
+                    .unwrap_or_else(|_| "-1".into());
                 let val = if typ.eq_ignore_ascii_case("string") {
-                    send_resp_command(&self.target, &["GET", &k]).await.unwrap_or_default()
+                    send_resp_command(&self.target, &["GET", &k])
+                        .await
+                        .unwrap_or_default()
                 } else {
                     format!("<{typ}>")
                 };
@@ -232,8 +242,20 @@ impl DatabaseAdapter for KvAdapter {
             }
             let total = rows.len() as i64;
             return Ok(QueryResult {
-                columns: vec!["key".into(), "data_type".into(), "value".into(), "ttl_seconds".into(), "byte_size".into()],
-                column_types: vec!["TEXT".into(), "TEXT".into(), "TEXT".into(), "INTEGER".into(), "INTEGER".into()],
+                columns: vec![
+                    "key".into(),
+                    "data_type".into(),
+                    "value".into(),
+                    "ttl_seconds".into(),
+                    "byte_size".into(),
+                ],
+                column_types: vec![
+                    "TEXT".into(),
+                    "TEXT".into(),
+                    "TEXT".into(),
+                    "INTEGER".into(),
+                    "INTEGER".into(),
+                ],
                 pk_columns: vec!["key".into()],
                 rows,
                 total_rows: Some(total),
@@ -333,7 +355,10 @@ impl DatabaseAdapter for KvAdapter {
                 columns: vec!["command".into(), "response".into()],
                 column_types: vec!["TEXT".into(), "TEXT".into()],
                 pk_columns: Vec::new(),
-                rows: vec![vec![CellValue::Text(query.trim().to_string()), CellValue::Text(resp)]],
+                rows: vec![vec![
+                    CellValue::Text(query.trim().to_string()),
+                    CellValue::Text(resp),
+                ]],
                 total_rows: Some(1),
                 affected_rows: 0,
                 duration_ms: start.elapsed().as_millis() as u64,

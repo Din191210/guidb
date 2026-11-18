@@ -2,11 +2,7 @@ use crate::error::{AppError, AppResult};
 use guidb_shared::{DdlAction, EngineKind, ProtectionMode, StagedMutation};
 
 /// Check whether a raw query / command is safe under global anti-destruction rules and connection ProtectionMode.
-pub fn check_query_safety(
-    engine: EngineKind,
-    mode: ProtectionMode,
-    query: &str,
-) -> AppResult<()> {
+pub fn check_query_safety(engine: EngineKind, mode: ProtectionMode, query: &str) -> AppResult<()> {
     let normalized = strip_comments_and_collapse(query);
     if normalized.is_empty() {
         return Err(AppError::BadRequest("Query cannot be empty".into()));
@@ -49,7 +45,8 @@ pub fn check_query_safety(
     }
 
     if engine == EngineKind::MongoDb {
-        if mode == ProtectionMode::ReadOnly && (upper.contains("DELETE") || upper.contains("DROP")) {
+        if mode == ProtectionMode::ReadOnly && (upper.contains("DELETE") || upper.contains("DROP"))
+        {
             return Err(AppError::BadRequest(
                 "DIBLOKIR (Mode READ-ONLY): Operasi penghapusan dokumen tidak diizinkan.".into(),
             ));
@@ -71,9 +68,7 @@ pub fn check_query_safety(
     }
 
     if mode == ProtectionMode::SafeGuard {
-        if upper.contains("DROP TABLE")
-            || upper.contains("DROP VIEW")
-            || upper.contains("TRUNCATE")
+        if upper.contains("DROP TABLE") || upper.contains("DROP VIEW") || upper.contains("TRUNCATE")
         {
             return Err(AppError::BadRequest(
                 "DIBLOKIR (Mode SAFE GUARD): DROP TABLE / DROP VIEW / TRUNCATE ditahan agar tabel tidak terhapus. Buat backup dahulu atau ganti mode ke UNRESTRICTED.".into(),
@@ -95,10 +90,7 @@ pub fn check_query_safety(
 }
 
 /// Check staged grid mutations against the connection ProtectionMode.
-pub fn check_mutations_safety(
-    mode: ProtectionMode,
-    mutations: &[StagedMutation],
-) -> AppResult<()> {
+pub fn check_mutations_safety(mode: ProtectionMode, mutations: &[StagedMutation]) -> AppResult<()> {
     if mode == ProtectionMode::ReadOnly {
         return Err(AppError::BadRequest(
             "DIBLOKIR (Mode READ-ONLY): Koneksi terkunci hanya-baca; mutasi baris tidak dapat disimpan.".into(),
@@ -120,7 +112,8 @@ pub fn check_mutations_safety(
 pub fn check_ddl_safety(mode: ProtectionMode, action: &DdlAction) -> AppResult<()> {
     if mode == ProtectionMode::ReadOnly {
         return Err(AppError::BadRequest(
-            "DIBLOKIR (Mode READ-ONLY): Koneksi terkunci hanya-baca; perubahan skema DDL ditolak.".into(),
+            "DIBLOKIR (Mode READ-ONLY): Koneksi terkunci hanya-baca; perubahan skema DDL ditolak."
+                .into(),
         ));
     }
     if mode == ProtectionMode::SafeGuard

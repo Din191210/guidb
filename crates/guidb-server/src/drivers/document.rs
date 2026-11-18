@@ -63,13 +63,12 @@ impl DatabaseAdapter for DocumentAdapter {
     }
 
     async fn inspect_structure(&self, item: &str) -> AppResult<StructureDef> {
-        let rows = sqlx::query(
-            "SELECT doc_json FROM _guidb_documents WHERE collection = ?1 LIMIT 100",
-        )
-        .bind(item)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows =
+            sqlx::query("SELECT doc_json FROM _guidb_documents WHERE collection = ?1 LIMIT 100")
+                .bind(item)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut field_types: BTreeMap<String, String> = BTreeMap::new();
         field_types.insert("_id".to_string(), "ObjectId / String".to_string());
@@ -163,7 +162,12 @@ impl DatabaseAdapter for DocumentAdapter {
         let end_idx = (start_idx + opts.limit.clamp(1, 500) as usize).min(parsed_docs.len());
         let page = &parsed_docs[start_idx..end_idx];
 
-        Ok(docs_to_query_result(page, Some(total), start.elapsed().as_millis() as u64, None))
+        Ok(docs_to_query_result(
+            page,
+            Some(total),
+            start.elapsed().as_millis() as u64,
+            None,
+        ))
     }
 
     async fn execute_query(&self, item: Option<&str>, query: &str) -> AppResult<QueryResult> {
@@ -248,7 +252,11 @@ impl DatabaseAdapter for DocumentAdapter {
                                 }
                                 _ => va.cmp(&vb),
                             };
-                            if desc { ord.reverse() } else { ord }
+                            if desc {
+                                ord.reverse()
+                            } else {
+                                ord
+                            }
                         });
                     }
                 } else if let Some(limit_val) = stage_obj.get("$limit").and_then(|v| v.as_u64()) {
@@ -317,7 +325,9 @@ impl DatabaseAdapter for DocumentAdapter {
                     let doc_id = pk_match
                         .get("_id")
                         .map(CellValue::display_text)
-                        .ok_or_else(|| AppError::BadRequest("Missing _id for document update".into()))?;
+                        .ok_or_else(|| {
+                            AppError::BadRequest("Missing _id for document update".into())
+                        })?;
                     let raw: String = sqlx::query_scalar(
                         "SELECT doc_json FROM _guidb_documents WHERE collection = ?1 AND doc_id = ?2",
                     )
@@ -352,13 +362,17 @@ impl DatabaseAdapter for DocumentAdapter {
                     let doc_id = pk_match
                         .get("_id")
                         .map(CellValue::display_text)
-                        .ok_or_else(|| AppError::BadRequest("Missing _id for document delete".into()))?;
-                    sqlx::query("DELETE FROM _guidb_documents WHERE collection = ?1 AND doc_id = ?2")
-                        .bind(item)
-                        .bind(&doc_id)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|e| AppError::Database(e.to_string()))?;
+                        .ok_or_else(|| {
+                            AppError::BadRequest("Missing _id for document delete".into())
+                        })?;
+                    sqlx::query(
+                        "DELETE FROM _guidb_documents WHERE collection = ?1 AND doc_id = ?2",
+                    )
+                    .bind(item)
+                    .bind(&doc_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| AppError::Database(e.to_string()))?;
                 }
             }
         }

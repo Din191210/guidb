@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use tokio::net::TcpListener;
 
 async fn spawn_test_app() -> (String, PathBuf) {
-    let temp_dir = std::env::temp_dir().join(format!("guidb_test_{}", uuid::Uuid::new_v4().simple()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("guidb_test_{}", uuid::Uuid::new_v4().simple()));
     let state = catalog::init_app_state(temp_dir.clone())
         .await
         .expect("init test state");
@@ -74,8 +75,14 @@ async fn test_staged_mutations_commit_and_persist() {
         "contact_email".to_string(),
         CellValue::Text("qa@integrasirust.id".to_string()),
     );
-    insert_vals.insert("city".to_string(), CellValue::Text("Yogyakarta".to_string()));
-    insert_vals.insert("tier".to_string(), CellValue::Text("ENTERPRISE".to_string()));
+    insert_vals.insert(
+        "city".to_string(),
+        CellValue::Text("Yogyakarta".to_string()),
+    );
+    insert_vals.insert(
+        "tier".to_string(),
+        CellValue::Text("ENTERPRISE".to_string()),
+    );
     insert_vals.insert("credit_limit".to_string(), CellValue::Int(95000000));
     insert_vals.insert(
         "created_at".to_string(),
@@ -85,7 +92,10 @@ async fn test_staged_mutations_commit_and_persist() {
     let mut pk_match = BTreeMap::new();
     pk_match.insert("id".to_string(), CellValue::Int(1));
     let mut update_changes = BTreeMap::new();
-    update_changes.insert("city".to_string(), CellValue::Text("Jakarta Selatan".to_string()));
+    update_changes.insert(
+        "city".to_string(),
+        CellValue::Text("Jakarta Selatan".to_string()),
+    );
 
     let mut del_pk = BTreeMap::new();
     del_pk.insert("id".to_string(), CellValue::Int(5));
@@ -128,7 +138,9 @@ async fn test_staged_mutations_commit_and_persist() {
     assert_eq!(blocked_del.status().as_u16(), 400);
 
     let prot_resp = client
-        .put(format!("{base}/api/connections/conn-commerce-core/protection"))
+        .put(format!(
+            "{base}/api/connections/conn-commerce-core/protection"
+        ))
         .json(&serde_json::json!({ "protection_mode": ProtectionMode::Unrestricted }))
         .send()
         .await

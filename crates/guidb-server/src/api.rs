@@ -44,14 +44,18 @@ pub async fn get_bootstrap(State(state): State<AppState>) -> AppResult<Json<Boot
         .first()
         .cloned()
         .ok_or_else(|| AppError::NotFound("No database connections registered".into()))?;
-    let workspace = load_workspace_for(&state, &first, WorkspaceQuery {
-        item: None,
-        filter: None,
-        sort_col: None,
-        sort_dir: None,
-        limit: Some(100),
-        offset: Some(0),
-    })
+    let workspace = load_workspace_for(
+        &state,
+        &first,
+        WorkspaceQuery {
+            item: None,
+            filter: None,
+            sort_col: None,
+            sort_dir: None,
+            limit: Some(100),
+            offset: Some(0),
+        },
+    )
     .await?;
     let history = catalog::list_history(&state.catalog_pool, 50).await?;
     let saved_queries = catalog::list_saved_queries(&state.catalog_pool).await?;
@@ -186,10 +190,7 @@ pub async fn execute_query(
         return Err(err);
     }
     let adapter = resolve_adapter(&state, &conn).await?;
-    match adapter
-        .execute_query(req.item.as_deref(), &req.query)
-        .await
-    {
+    match adapter.execute_query(req.item.as_deref(), &req.query).await {
         Ok(res) => {
             let rows_metric = if res.affected_rows > 0 {
                 res.affected_rows as i64
@@ -335,11 +336,15 @@ pub async fn update_protection(
     Path(id): Path<String>,
     Json(req): Json<UpdateProtectionRequest>,
 ) -> AppResult<Json<ConnectionProfile>> {
-    let updated = catalog::update_connection_protection(&state.catalog_pool, &id, req.protection_mode).await?;
+    let updated =
+        catalog::update_connection_protection(&state.catalog_pool, &id, req.protection_mode)
+            .await?;
     Ok(Json(updated))
 }
 
-pub async fn get_backups(State(state): State<AppState>) -> AppResult<Json<BackupDashboardResponse>> {
+pub async fn get_backups(
+    State(state): State<AppState>,
+) -> AppResult<Json<BackupDashboardResponse>> {
     Ok(Json(backup::get_backup_dashboard(&state).await?))
 }
 
@@ -347,7 +352,14 @@ pub async fn create_backup(
     State(state): State<AppState>,
     Json(req): Json<CreateBackupRequest>,
 ) -> AppResult<(StatusCode, Json<BackupRecord>)> {
-    let rec = backup::create_backup(&state, &req.connection_id, BackupKind::Manual, req.scope, req.label).await?;
+    let rec = backup::create_backup(
+        &state,
+        &req.connection_id,
+        BackupKind::Manual,
+        req.scope,
+        req.label,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(rec)))
 }
 
@@ -378,7 +390,10 @@ pub async fn download_backup(
     } else {
         "application/sql"
     };
-    headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static(content_type));
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static(content_type),
+    );
     let disp = header::HeaderValue::from_str(&format!("attachment; filename=\"{file_name}\""))
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
     headers.insert(header::CONTENT_DISPOSITION, disp);
@@ -398,7 +413,9 @@ pub async fn toggle_schedule(
     Path(id): Path<String>,
     Json(req): Json<ToggleScheduleRequest>,
 ) -> AppResult<Json<BackupSchedule>> {
-    Ok(Json(backup::toggle_schedule(&state, &id, req.enabled).await?))
+    Ok(Json(
+        backup::toggle_schedule(&state, &id, req.enabled).await?,
+    ))
 }
 
 pub async fn run_schedule(
@@ -425,7 +442,9 @@ pub async fn list_history(
 pub async fn list_saved_queries(
     State(state): State<AppState>,
 ) -> AppResult<Json<Vec<SavedQueryEntry>>> {
-    Ok(Json(catalog::list_saved_queries(&state.catalog_pool).await?))
+    Ok(Json(
+        catalog::list_saved_queries(&state.catalog_pool).await?,
+    ))
 }
 
 pub async fn create_saved_query(
@@ -492,9 +511,13 @@ pub async fn export_item(
                                 guidb_shared::CellValue::Bool(b) => serde_json::Value::Bool(*b),
                                 guidb_shared::CellValue::Int(i) => serde_json::json!(i),
                                 guidb_shared::CellValue::Float(f) => serde_json::json!(f),
-                                guidb_shared::CellValue::Text(s) => serde_json::Value::String(s.clone()),
+                                guidb_shared::CellValue::Text(s) => {
+                                    serde_json::Value::String(s.clone())
+                                }
                                 guidb_shared::CellValue::Json(j) => j.clone(),
-                                guidb_shared::CellValue::Bytes(b) => serde_json::Value::String(b.clone()),
+                                guidb_shared::CellValue::Bytes(b) => {
+                                    serde_json::Value::String(b.clone())
+                                }
                             };
                             (col.clone(), v)
                         })
@@ -533,10 +556,9 @@ pub async fn export_item(
                 header::CONTENT_TYPE,
                 header::HeaderValue::from_static("application/sql"),
             );
-            let disp = header::HeaderValue::from_str(&format!(
-                "attachment; filename=\"{base_name}.sql\""
-            ))
-            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+            let disp =
+                header::HeaderValue::from_str(&format!("attachment; filename=\"{base_name}.sql\""))
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
             headers.insert(header::CONTENT_DISPOSITION, disp);
             Ok((headers, body))
         }
@@ -563,10 +585,9 @@ pub async fn export_item(
                 header::CONTENT_TYPE,
                 header::HeaderValue::from_static("text/csv; charset=utf-8"),
             );
-            let disp = header::HeaderValue::from_str(&format!(
-                "attachment; filename=\"{base_name}.csv\""
-            ))
-            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+            let disp =
+                header::HeaderValue::from_str(&format!("attachment; filename=\"{base_name}.csv\""))
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
             headers.insert(header::CONTENT_DISPOSITION, disp);
             Ok((headers, body))
         }

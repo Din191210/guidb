@@ -43,7 +43,10 @@ pub fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/api/backups/{id}/restore", post(api::restore_backup))
         .route("/api/backups/{id}/download", get(api::download_backup))
         .route("/api/backups/schedules", post(api::create_schedule))
-        .route("/api/backups/schedules/{id}/toggle", post(api::toggle_schedule))
+        .route(
+            "/api/backups/schedules/{id}/toggle",
+            post(api::toggle_schedule),
+        )
         .route("/api/backups/schedules/{id}/run", post(api::run_schedule))
         .route("/api/backups/schedules/{id}", delete(api::delete_schedule))
         .route("/api/schema-sync/diff", post(api::schema_sync_diff))

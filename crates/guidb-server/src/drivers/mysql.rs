@@ -189,7 +189,13 @@ impl DatabaseAdapter for MysqlAdapter {
             .map(|c| {
                 let nn = if !c.nullable { " NOT NULL" } else { "" };
                 let pk = if c.is_pk { " PRIMARY KEY" } else { "" };
-                format!("  {} {}{}{}", quote_ident(&c.name, EngineKind::Mysql), c.data_type, pk, nn)
+                format!(
+                    "  {} {}{}{}",
+                    quote_ident(&c.name, EngineKind::Mysql),
+                    c.data_type,
+                    pk,
+                    nn
+                )
             })
             .collect();
         let ddl = format!(
@@ -297,7 +303,11 @@ impl DatabaseAdapter for MysqlAdapter {
         let start = Instant::now();
         let trimmed = query.trim();
         let upper = trimmed.to_uppercase();
-        if upper.starts_with("SELECT") || upper.starts_with("SHOW") || upper.starts_with("EXPLAIN") || upper.starts_with("DESCRIBE") {
+        if upper.starts_with("SELECT")
+            || upper.starts_with("SHOW")
+            || upper.starts_with("EXPLAIN")
+            || upper.starts_with("DESCRIBE")
+        {
             let rows_raw = sqlx::query(trimmed)
                 .fetch_all(&self.pool)
                 .await
@@ -465,7 +475,8 @@ impl DatabaseAdapter for MysqlAdapter {
                 let mut defs = Vec::new();
                 for c in columns {
                     let vc = validate_identifier(&c.name).map_err(AppError::BadRequest)?;
-                    let mut line = format!("{} {}", quote_ident(&vc, EngineKind::Mysql), c.data_type);
+                    let mut line =
+                        format!("{} {}", quote_ident(&vc, EngineKind::Mysql), c.data_type);
                     if c.is_pk {
                         line.push_str(" PRIMARY KEY");
                     } else if !c.nullable {

@@ -122,7 +122,13 @@ pub async fn create_backup(
     let safe_slug: String = conn
         .name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     let mut total_rows = 0_usize;
@@ -280,8 +286,8 @@ pub async fn create_backup(
             created_at: created_at.clone(),
             collections,
         };
-        let json_bytes = serde_json::to_vec_pretty(&bundle)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        let json_bytes =
+            serde_json::to_vec_pretty(&bundle).map_err(|e| AppError::Database(e.to_string()))?;
         ("json", json_bytes)
     };
 
@@ -293,11 +299,16 @@ pub async fn create_backup(
     let final_label = label
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{} Backup ({stamp})", match kind {
-            BackupKind::Manual => "Manual",
-            BackupKind::Scheduled => "Scheduled",
-            BackupKind::PreMigrationAuto => "Pre-Sync",
-        }));
+        .unwrap_or_else(|| {
+            format!(
+                "{} Backup ({stamp})",
+                match kind {
+                    BackupKind::Manual => "Manual",
+                    BackupKind::Scheduled => "Scheduled",
+                    BackupKind::PreMigrationAuto => "Pre-Sync",
+                }
+            )
+        });
 
     sqlx::query(
         "INSERT INTO backup_records (id, connection_id, connection_name, engine, kind, scope, label, file_name, file_size_bytes, sha256, object_count, row_count, created_at)
@@ -445,8 +456,7 @@ pub async fn restore_backup_isolated(
         .unwrap_or_else(|| format!("Restored: {} ({stamp})", rec.connection_name));
 
     if rec.file_name.ends_with(".sql") {
-        let sql_text =
-            String::from_utf8(bytes).map_err(|e| AppError::Database(e.to_string()))?;
+        let sql_text = String::from_utf8(bytes).map_err(|e| AppError::Database(e.to_string()))?;
         let pool = catalog::open_sqlite_pool(&resolved)
             .await
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -515,12 +525,14 @@ pub async fn restore_backup_isolated(
 
     if target_engine == EngineKind::MongoDb {
         for (col_name, docs) in bundle.collections {
-            sqlx::query("INSERT OR IGNORE INTO _guidb_collections (name, created_at) VALUES (?1, ?2)")
-                .bind(&col_name)
-                .bind(&now)
-                .execute(&pool)
-                .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+            sqlx::query(
+                "INSERT OR IGNORE INTO _guidb_collections (name, created_at) VALUES (?1, ?2)",
+            )
+            .bind(&col_name)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
             for doc in docs {
                 let doc_id = doc
                     .get("_id")
@@ -548,9 +560,15 @@ pub async fn restore_backup_isolated(
                 if key.is_empty() {
                     continue;
                 }
-                let dt = row.get("data_type").and_then(|v| v.as_str()).unwrap_or("STRING");
+                let dt = row
+                    .get("data_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("STRING");
                 let val = row.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                let ttl = row.get("ttl_seconds").and_then(|v| v.as_i64()).unwrap_or(-1);
+                let ttl = row
+                    .get("ttl_seconds")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(-1);
                 let ns = if let Some((p, _)) = key.split_once(':') {
                     format!("{p}:*")
                 } else {

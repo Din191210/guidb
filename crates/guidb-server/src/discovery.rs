@@ -20,7 +20,10 @@ pub async fn scan_server_databases(state: &AppState) -> AppResult<ServerDiscover
     let mut target_to_id: HashMap<(String, String), String> = HashMap::new();
     for c in &existing {
         target_to_id.insert(
-            (catalog::engine_to_str(c.engine).to_string(), c.target.clone()),
+            (
+                catalog::engine_to_str(c.engine).to_string(),
+                c.target.clone(),
+            ),
             c.id.clone(),
         );
     }
@@ -86,7 +89,10 @@ async fn find_binary(candidates: &[&str]) -> Option<String> {
         }
     }
     for c in candidates {
-        let name = Path::new(c).file_name().and_then(|s| s.to_str()).unwrap_or(c);
+        let name = Path::new(c)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(c);
         if let Ok(out) = Command::new("which").arg(name).output().await {
             if out.status.success() {
                 let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -100,13 +106,10 @@ async fn find_binary(candidates: &[&str]) -> Option<String> {
 }
 
 async fn run_version_cmd(bin: &str, arg: &str) -> Option<String> {
-    let out = tokio::time::timeout(
-        Duration::from_secs(2),
-        Command::new(bin).arg(arg).output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let out = tokio::time::timeout(Duration::from_secs(2), Command::new(bin).arg(arg).output())
+        .await
+        .ok()?
+        .ok()?;
     let combined = format!(
         "{} {}",
         String::from_utf8_lossy(&out.stdout),
@@ -157,7 +160,10 @@ fn find_registered(
     engine: EngineKind,
     target: &str,
 ) -> (bool, Option<String>) {
-    let key = (catalog::engine_to_str(engine).to_string(), target.to_string());
+    let key = (
+        catalog::engine_to_str(engine).to_string(),
+        target.to_string(),
+    );
     match map.get(&key) {
         Some(id) => (true, Some(id.clone())),
         None => (false, None),
@@ -388,7 +394,8 @@ async fn inspect_mysql_mariadb(
         .map(|(a, _)| a.clone())
         .or_else(|| Some("127.0.0.1:3306".to_string()));
     let latency_ms = open_ports.first().map(|(_, l)| *l);
-    let can_provision_local = bin.is_some() && !open_ports.iter().any(|(a, _)| a.ends_with(":33307"));
+    let can_provision_local =
+        bin.is_some() && !open_ports.iter().any(|(a, _)| a.ends_with(":33307"));
 
     DiscoveredEngine {
         engine: EngineKind::Mysql,
@@ -583,7 +590,10 @@ async fn inspect_sqlite(
     } else {
         "Embedded SQLx SQLite".to_string()
     };
-    params.insert("data_directory".into(), state.data_dir.display().to_string());
+    params.insert(
+        "data_directory".into(),
+        state.data_dir.display().to_string(),
+    );
 
     let mut databases = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&state.data_dir) {
@@ -913,11 +923,12 @@ async fn provision_local_postgres(state: &AppState) -> AppResult<ProvisionEngine
     let sock_dir = state.data_dir.join("pg_sockets");
     std::fs::create_dir_all(&sock_dir).map_err(|e| AppError::Database(e.to_string()))?;
 
-    let chosen_port: u16 = if tcp_probe("127.0.0.1:55432").await.is_some() && !pg_dir.join("PG_VERSION").exists() {
-        55433
-    } else {
-        55432
-    };
+    let chosen_port: u16 =
+        if tcp_probe("127.0.0.1:55432").await.is_some() && !pg_dir.join("PG_VERSION").exists() {
+            55433
+        } else {
+            55432
+        };
 
     if !pg_dir.join("PG_VERSION").exists() {
         let out = Command::new("/usr/bin/initdb")
@@ -1030,9 +1041,7 @@ async fn provision_local_postgres(state: &AppState) -> AppResult<ProvisionEngine
     let discovery = scan_server_databases(state).await?;
     Ok(ProvisionEngineResponse {
         connection,
-        message: format!(
-            "PostgreSQL 18 lokal berhasil dinyalakan di {addr} (database: guidb_pg)."
-        ),
+        message: format!("PostgreSQL 18 lokal berhasil dinyalakan di {addr} (database: guidb_pg)."),
         discovery,
     })
 }
@@ -1161,7 +1170,9 @@ async fn provision_local_mariadb(state: &AppState) -> AppResult<ProvisionEngineR
     let discovery = scan_server_databases(state).await?;
     Ok(ProvisionEngineResponse {
         connection,
-        message: "MariaDB 12.3 lokal berhasil dinyalakan di 127.0.0.1:33307 (database: guidb_mariadb).".into(),
+        message:
+            "MariaDB 12.3 lokal berhasil dinyalakan di 127.0.0.1:33307 (database: guidb_mariadb)."
+                .into(),
         discovery,
     })
 }

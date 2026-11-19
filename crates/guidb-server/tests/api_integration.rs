@@ -446,6 +446,18 @@ async fn test_protection_guardrails_and_backup_restore_schedule() {
         .expect("parse run record");
     assert!(run_rec.file_name.ends_with(".json"));
 
+    let second: BackupSchedule = client.post(format!("{base}/api/backups/schedules"))
+        .json(&serde_json::json!({"connection_id":"conn-telemetry-docs","interval_minutes":60,"scope":"schema_only","retention_count":1}))
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    for _ in 0..2 {
+        client
+            .post(format!("{base}/api/backups/schedules/{}/run", second.id))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
     let dash: BackupDashboardResponse = client
         .get(format!("{base}/api/backups"))
         .send()
@@ -454,8 +466,128 @@ async fn test_protection_guardrails_and_backup_restore_schedule() {
         .json()
         .await
         .expect("parse dashboard");
-    assert!(dash.backups.len() >= 2);
+    assert_eq!(
+        dash.backups
+            .iter()
+            .filter(|b| b.connection_id == "conn-telemetry-docs")
+            .count(),
+        2
+    );
+    assert!(dash.backups.iter().any(|b| b.id == run_rec.id));
     assert!(dash.schedules.len() >= 2);
 
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn sqlite_export_and_snapshot_preserve_the_whole_table() {
+    use sqlx::sqlite::SqliteConnectOptions;
+    let (base, dir) = spawn_test_app().await;
+    let client = reqwest::Client::new();
+    let db = sqlx::SqlitePool::connect_with(
+        SqliteConnectOptions::new().filename(dir.join("commerce_core.sqlite")),
+    )
+    .await
+    .expect("open test database");
+    sqlx::raw_sql(
+        "CREATE TABLE samples(id INTEGER PRIMARY KEY, label TEXT);
+         CREATE TRIGGER sample_insert AFTER INSERT ON samples BEGIN SELECT 1; END;
+         WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n < 501)
+         INSERT INTO samples SELECT n, 'row' FROM ids;",
+    )
+    .execute(&db)
+    .await
+    .expect("seed sample rows");
+    let copy = DdlAction::CopyTable {
+        source_table: "samples".into(),
+        table_name: "sample_copy".into(),
+    };
+    let ddl = format!("{base}/api/connections/conn-commerce-core/ddl");
+    client
+        .post(&ddl)
+        .json(&copy)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert!(!client
+        .post(&ddl)
+        .json(&copy)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sample_copy")
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+        501
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT pk FROM pragma_table_info('sample_copy') WHERE name='id'"
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap(),
+        1
+    );
+    let exported: Vec<serde_json::Value> = client
+        .get(format!(
+            "{base}/api/connections/conn-commerce-core/export?item=samples&format=json"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(exported.len(), 501);
+    assert_eq!(exported[500]["id"], 501);
+    let backup: BackupRecord = client.post(format!("{base}/api/backups/create"))
+        .json(&serde_json::json!({"connection_id":"conn-commerce-core","scope":"full_schema_and_data"}))
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert!(backup.file_name.ends_with(".sqlite"));
+    let restore: RestoreBackupResponse = client
+        .post(format!("{base}/api/backups/{}/restore", backup.id))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let restored = sqlx::SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(dir.join(restore.connection.target))
+            .read_only(true),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM samples")
+            .fetch_one(&restored)
+            .await
+            .unwrap(),
+        501
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name='sample_insert'"
+        )
+        .fetch_one(&restored)
+        .await
+        .unwrap(),
+        1
+    );
+    restored.close().await;
+    db.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
 }

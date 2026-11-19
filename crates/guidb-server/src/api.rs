@@ -154,10 +154,13 @@ pub async fn load_workspace_for(
         (None, None)
     };
 
-    let erd = adapter.build_erd().await.unwrap_or(guidb_shared::ErdGraph {
-        nodes: Vec::new(),
-        edges: Vec::new(),
-    });
+    let erd = adapter
+        .build_erd(&items)
+        .await
+        .unwrap_or(guidb_shared::ErdGraph {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        });
 
     Ok(WorkspaceResponse {
         connection: conn.clone(),
@@ -245,6 +248,37 @@ pub async fn mutate_staged(
         return Err(err);
     }
     let adapter = resolve_adapter(&state, &conn).await?;
+    if conn.engine.model() == guidb_shared::DataModel::Relational {
+        let mut keys = std::collections::HashMap::new();
+        for mutation in &req.mutations {
+            use guidb_shared::StagedMutation;
+            let (item, selected) = match mutation {
+                StagedMutation::Update { item, pk_match, .. }
+                | StagedMutation::Delete { item, pk_match } => (item, pk_match),
+                StagedMutation::Insert { .. } => continue,
+            };
+            if !keys.contains_key(item) {
+                let primary: Vec<_> = adapter
+                    .inspect_structure(item)
+                    .await?
+                    .columns
+                    .into_iter()
+                    .filter(|c| c.is_pk)
+                    .map(|c| c.name)
+                    .collect();
+                keys.insert(item.clone(), primary);
+            }
+            let primary = &keys[item];
+            if primary.is_empty()
+                || primary.len() != selected.len()
+                || primary.iter().any(|c| !selected.contains_key(c))
+            {
+                return Err(AppError::BadRequest(
+                    "Perubahan baris memerlukan primary key lengkap.".into(),
+                ));
+            }
+        }
+    }
     let previews = preview_mutations(&req.mutations, conn.engine);
     let report = adapter.apply_staged_mutations(&req.mutations).await?;
     catalog::record_history(
@@ -312,7 +346,22 @@ pub async fn schema_sync_apply(
             "DIBLOKIR (Mode READ-ONLY): Target Schema Sync terkunci hanya-baca.".into(),
         ));
     }
-    let _ = backup::create_backup(
+    let plan = sync::compute_schema_diff(&state, &req.source_conn_id, &req.target_conn_id).await?;
+    for statement in &req.statements {
+        if !plan
+            .differences
+            .iter()
+            .any(|diff| diff.migration_sql == *statement)
+        {
+            return Err(AppError::BadRequest(
+                "Skema telah berubah. Hitung ulang perbedaan sebelum menerapkan migrasi.".into(),
+            ));
+        }
+        if !statement.trim_start().starts_with("--") {
+            safety::check_query_safety(target_conn.engine, target_conn.protection_mode, statement)?;
+        }
+    }
+    backup::create_backup(
         &state,
         &req.target_conn_id,
         BackupKind::PreMigrationAuto,
@@ -387,6 +436,8 @@ pub async fn download_backup(
     let mut headers = HeaderMap::new();
     let content_type = if file_name.ends_with(".json") {
         "application/json"
+    } else if file_name.ends_with(".sqlite") {
+        "application/vnd.sqlite3"
     } else {
         "application/sql"
     };
@@ -470,7 +521,7 @@ pub async fn export_item(
 ) -> AppResult<impl IntoResponse> {
     let conn = catalog::get_connection(&state.catalog_pool, &id).await?;
     let adapter = resolve_adapter(&state, &conn).await?;
-    let data = adapter
+    let mut data = adapter
         .fetch_item_data(
             &q.item,
             DataQueryOptions {
@@ -482,6 +533,33 @@ pub async fn export_item(
             },
         )
         .await?;
+
+    if conn.engine.model() == guidb_shared::DataModel::Relational {
+        let expected = data.total_rows.unwrap_or(data.rows.len() as i64);
+        while (data.rows.len() as i64) < expected {
+            let page = adapter
+                .fetch_item_data(
+                    &q.item,
+                    DataQueryOptions {
+                        filter: None,
+                        sort_col: None,
+                        sort_dir: None,
+                        limit: 500,
+                        offset: data.rows.len() as i64,
+                    },
+                )
+                .await?;
+            if page.columns != data.columns
+                || page.rows.is_empty()
+                || page.total_rows != Some(expected)
+            {
+                return Err(AppError::BadRequest(
+                    "Tabel berubah selama ekspor. Ulangi ekspor.".into(),
+                ));
+            }
+            data.rows.extend(page.rows);
+        }
+    }
 
     let safe_filename: String = q
         .item
@@ -564,7 +642,14 @@ pub async fn export_item(
         }
         _ => {
             let mut body = String::new();
-            body.push_str(&data.columns.join(","));
+            body.push_str(
+                &data
+                    .columns
+                    .iter()
+                    .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
             body.push('\n');
             for row in &data.rows {
                 let cells: Vec<String> = row

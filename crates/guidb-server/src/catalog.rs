@@ -61,7 +61,7 @@ pub async fn init_app_state(data_dir: PathBuf) -> anyhow::Result<AppState> {
 }
 
 async fn ensure_catalog_schema(pool: &SqlitePool) -> anyhow::Result<()> {
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
         CREATE TABLE IF NOT EXISTS connections (
             id TEXT PRIMARY KEY,
@@ -141,6 +141,19 @@ async fn ensure_catalog_schema(pool: &SqlitePool) -> anyhow::Result<()> {
         .context("Failed migrating connections.protection_mode")?;
     }
 
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let migrated: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pragma_table_info('backup_records') WHERE name='schedule_id'",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if migrated == 0 {
+        sqlx::query("ALTER TABLE backup_records ADD COLUMN schedule_id TEXT")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE backup_records SET schedule_id = (SELECT min(s.id) FROM backup_schedules s WHERE s.connection_id = backup_records.connection_id HAVING count(*) = 1) WHERE kind = 'scheduled'").execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -714,6 +727,26 @@ pub async fn update_connection_protection(
     get_connection(pool, id).await
 }
 
+pub async fn ensure_store_schema(pool: &SqlitePool, engine: EngineKind) -> AppResult<()> {
+    if engine == EngineKind::MongoDb {
+        sqlx::raw_sql(
+                "CREATE TABLE IF NOT EXISTS _guidb_collections (name TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+                 CREATE TABLE IF NOT EXISTS _guidb_documents (collection TEXT NOT NULL, doc_id TEXT NOT NULL, doc_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (collection, doc_id));",
+            )
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+    } else if engine == EngineKind::Redis {
+        sqlx::raw_sql(
+                "CREATE TABLE IF NOT EXISTS _guidb_kv (key TEXT PRIMARY KEY, namespace TEXT NOT NULL, data_type TEXT NOT NULL, value_text TEXT NOT NULL, ttl_seconds INTEGER NOT NULL DEFAULT -1, byte_size INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);",
+            )
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+    }
+    Ok(())
+}
+
 pub async fn create_connection(
     state: &AppState,
     req: CreateConnectionRequest,
@@ -742,22 +775,7 @@ pub async fn create_connection(
         let file_pool = open_sqlite_pool(&resolved)
             .await
             .map_err(|e| AppError::Database(e.to_string()))?;
-        if req.engine == EngineKind::MongoDb {
-            sqlx::raw_sql(
-                "CREATE TABLE IF NOT EXISTS _guidb_collections (name TEXT PRIMARY KEY, created_at TEXT NOT NULL);
-                 CREATE TABLE IF NOT EXISTS _guidb_documents (collection TEXT NOT NULL, doc_id TEXT NOT NULL, doc_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (collection, doc_id));",
-            )
-            .execute(&file_pool)
-            .await
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        } else if req.engine == EngineKind::Redis {
-            sqlx::raw_sql(
-                "CREATE TABLE IF NOT EXISTS _guidb_kv (key TEXT PRIMARY KEY, namespace TEXT NOT NULL, data_type TEXT NOT NULL, value_text TEXT NOT NULL, ttl_seconds INTEGER NOT NULL DEFAULT -1, byte_size INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);",
-            )
-            .execute(&file_pool)
-            .await
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        }
+        ensure_store_schema(&file_pool, req.engine).await?;
         file_pool.close().await;
     }
 

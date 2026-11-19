@@ -65,7 +65,7 @@ pub fn build_router(state: AppState, static_dir: PathBuf) -> Router {
                     "http_request",
                     id = %Uuid::new_v4(),
                     method = %req.method(),
-                    uri = %req.uri()
+                    path = %req.uri().path()
                 )
             }),
         )

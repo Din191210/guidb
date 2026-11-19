@@ -35,30 +35,138 @@ pub trait DatabaseAdapter: Send + Sync {
         mutations: &[StagedMutation],
     ) -> AppResult<MutationReport>;
     async fn execute_ddl(&self, action: DdlAction) -> AppResult<DdlReport>;
-    async fn build_erd(&self) -> AppResult<ErdGraph>;
+    async fn build_erd(&self, items: &[ItemInfo]) -> AppResult<ErdGraph>;
+}
+
+fn column_definition(
+    column: &guidb_shared::NewColumnSpec,
+    engine: EngineKind,
+) -> AppResult<String> {
+    let ty = column.data_type.trim().to_ascii_uppercase();
+    let (base, args) = ty.split_once('(').unwrap_or((&ty, ""));
+    let valid_type = matches!(
+        base.trim(),
+        "INT"
+            | "INTEGER"
+            | "BIGINT"
+            | "SMALLINT"
+            | "TINYINT"
+            | "SERIAL"
+            | "BIGSERIAL"
+            | "TEXT"
+            | "CHAR"
+            | "VARCHAR"
+            | "CHARACTER VARYING"
+            | "BOOLEAN"
+            | "BOOL"
+            | "NUMERIC"
+            | "REAL"
+            | "FLOAT"
+            | "DOUBLE"
+            | "DOUBLE PRECISION"
+            | "DECIMAL"
+            | "JSON"
+            | "JSONB"
+            | "BLOB"
+            | "BYTEA"
+            | "DATE"
+            | "TIME"
+            | "TIMESTAMP"
+            | "TIMESTAMPTZ"
+            | "DATETIME"
+            | "UUID"
+    );
+    let valid_args = !ty.contains('(')
+        || args.strip_suffix(')').is_some_and(|v| {
+            v.split(',').count() <= 2 && v.split(',').all(|n| n.trim().parse::<u16>().is_ok())
+        });
+    if !valid_type || !valid_args {
+        return Err(AppError::BadRequest(format!(
+            "Tipe kolom tidak didukung: {ty}"
+        )));
+    }
+    let mut definition = format!("{} {ty}", ddl_ident(&column.name, engine)?);
+    if column.is_pk {
+        definition.push_str(" PRIMARY KEY");
+        if engine == EngineKind::Sqlite && ty == "INTEGER" {
+            definition.push_str(" AUTOINCREMENT");
+        }
+    } else if !column.nullable {
+        definition.push_str(" NOT NULL");
+    }
+    if let Some(raw) = column
+        .default_value
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        definition.push_str(" DEFAULT ");
+        if matches!(
+            raw.to_ascii_uppercase().as_str(),
+            "NULL" | "CURRENT_TIMESTAMP" | "TRUE" | "FALSE"
+        ) || raw.parse::<f64>().is_ok_and(f64::is_finite)
+        {
+            definition.push_str(raw);
+        } else {
+            let value = raw
+                .strip_prefix('\'')
+                .and_then(|v| v.strip_suffix('\''))
+                .map(|v| v.replace("''", "'"))
+                .unwrap_or_else(|| raw.to_owned());
+            if engine == EngineKind::Mysql && value.contains('\\') {
+                return Err(AppError::BadRequest(
+                    "Nilai default dengan backslash harus diatur melalui editor SQL.".into(),
+                ));
+            }
+            definition.push_str(&format!("'{}'", value.replace('\'', "''")));
+        }
+    }
+    Ok(definition)
+}
+
+fn ddl_ident(name: &str, engine: EngineKind) -> AppResult<String> {
+    use guidb_shared::sql_gen::{quote_ident, validate_identifier};
+    Ok(quote_ident(
+        &validate_identifier(name).map_err(AppError::BadRequest)?,
+        engine,
+    ))
 }
 
 pub async fn resolve_adapter(
     state: &AppState,
     conn: &ConnectionProfile,
 ) -> AppResult<Box<dyn DatabaseAdapter>> {
+    let read_only = conn.protection_mode == guidb_shared::ProtectionMode::ReadOnly;
     match conn.engine {
         EngineKind::Sqlite => {
-            let pool = get_or_open_sqlite(state, conn).await?;
+            let pool = if read_only {
+                let path = catalog::resolve_sqlite_path(&state.data_dir, &conn.target);
+                let options = sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(path)
+                    .read_only(true)
+                    .pragma("query_only", "ON");
+                sqlx::sqlite::SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(options)
+                    .await
+                    .map_err(|e| AppError::Database(e.to_string()))?
+            } else {
+                get_or_open_sqlite(state, conn).await?
+            };
             Ok(Box::new(sqlite::SqliteAdapter::new(pool)))
         }
         EngineKind::Postgres => {
             let pool = get_or_open_postgres(state, conn).await?;
-            Ok(Box::new(postgres::PostgresAdapter::new(pool)))
+            Ok(Box::new(postgres::PostgresAdapter::new(pool, read_only)))
         }
         EngineKind::Mysql => {
             let pool = get_or_open_mysql(state, conn).await?;
-            Ok(Box::new(mysql::MysqlAdapter::new(pool)))
+            Ok(Box::new(mysql::MysqlAdapter::new(pool, read_only)))
         }
         EngineKind::MongoDb => {
             if conn.target.starts_with("mongodb://") {
                 return Err(AppError::BadRequest(
-                    "External mongodb:// wire driver requires active mongod TCP server; use local collection path for embedded Document Engine or test reachability first".into(),
+                    "Koneksi MongoDB eksternal hanya mendukung deteksi TCP. Gunakan file lokal untuk editor dokumen.".into(),
                 ));
             }
             let pool = get_or_open_sqlite(state, conn).await?;

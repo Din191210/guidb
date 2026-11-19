@@ -441,7 +441,7 @@ impl DatabaseAdapter for DocumentAdapter {
         }
     }
 
-    async fn build_erd(&self) -> AppResult<ErdGraph> {
+    async fn build_erd(&self, _: &[ItemInfo]) -> AppResult<ErdGraph> {
         Ok(ErdGraph {
             nodes: Vec::new(),
             edges: Vec::new(),

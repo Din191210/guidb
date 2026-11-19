@@ -10,6 +10,13 @@
     insertedRows: [],
     updatedCells: new Map(), // key: `${rowIdx}:${colName}` -> CellValue
     deletedRowIndices: new Set(),
+    offset: 0,
+    limit: 100,
+    requestId: 0,
+    queryResult: false,
+    copiedTable: null,
+    pasting: false,
+    saving: false,
     sortCol: null,
     sortDir: "asc",
     filterText: "",
@@ -108,9 +115,9 @@
     return String(cell.value);
   }
 
-  function parseInputToCell(raw, colType) {
+  function parseInputToCell(raw, colType, parseNull = true) {
     const trimmed = raw.trim();
-    if (trimmed.toUpperCase() === "NULL") return { kind: "null" };
+    if (parseNull && trimmed.toUpperCase() === "NULL") return { kind: "null" };
     const t = (colType || "").toUpperCase();
     if (t.includes("INT") && /^-?\d+$/.test(trimmed)) {
       return { kind: "int", value: Number(trimmed) };
@@ -121,7 +128,7 @@
     if (t.includes("BOOL") && (trimmed === "true" || trimmed === "false")) {
       return { kind: "bool", value: trimmed === "true" };
     }
-    if (t.includes("JSON") || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    if (t.includes("JSON")) {
       try {
         return { kind: "json", value: JSON.parse(trimmed) };
       } catch {
@@ -131,9 +138,11 @@
     return { kind: "text", value: raw };
   }
 
+  const modalOpeners = new Map();
   function openModal(id) {
     const el = document.getElementById(id);
     if (!el) return;
+    modalOpeners.set(id, document.activeElement);
     el.hidden = false;
     const focusable = el.querySelector("input, select, textarea, button");
     if (focusable) focusable.focus();
@@ -141,7 +150,10 @@
 
   function closeModal(id) {
     const el = document.getElementById(id);
-    if (el) el.hidden = true;
+    if (!el || el.hidden) return;
+    el.hidden = true;
+    modalOpeners.get(id)?.focus();
+    modalOpeners.delete(id);
   }
 
   function closeAllModals() {
@@ -206,7 +218,7 @@
     for (const newRow of state.insertedRows) {
       const values = {};
       for (const [k, v] of Object.entries(newRow)) {
-        if (v && v.kind !== "null") {
+        if (v) {
           values[k] = v;
         }
       }
@@ -223,7 +235,7 @@
     const bar = document.getElementById("staged-bar");
     const summary = document.getElementById("staged-summary");
     if (!bar || !summary) return;
-    const total = state.stagedMutations.length + state.insertedRows.filter((r) => Object.keys(r).length === 0).length;
+    document.getElementById("btn-commit-staged").disabled = !state.stagedMutations.length;
     if (state.stagedMutations.length === 0 && state.insertedRows.length === 0) {
       bar.hidden = true;
       return;
@@ -313,6 +325,8 @@
     const ws = state.workspace;
     if (!ws) return;
 
+    document.getElementById("workspace-path").textContent = ws.connection.name;
+    document.getElementById("workspace-object").textContent = ws.active_item || "Ruang kerja";
     const badge = document.getElementById("active-engine-badge");
     if (badge) {
       const envMap = { local: "env-local", staging: "env-staging", production: "env-prod" };
@@ -419,7 +433,26 @@
     const docView = document.getElementById("document-cards-view");
     if (!ws || !thead || !tbody) return;
 
-    if (titleEl) titleEl.textContent = ws.active_item || "Query Result";
+    const table = ws.items.find(i => i.name === ws.active_item)?.item_type === "TABLE";
+    const writable = !state.queryResult && ws.active_item && ws.connection.protection_mode !== "read_only" && (ws.model !== "relational" || table);
+    const paged = !state.queryResult && ws.model === "relational" && Boolean(ws.data);
+    document.getElementById("grid-pages").hidden = !paged;
+    document.getElementById("btn-add-row").disabled = !writable;
+    const relational = ws.model === "relational";
+    const canCreate = relational && ws.connection.protection_mode !== "read_only";
+    document.getElementById("grid-insert-table").disabled = !canCreate;
+    document.getElementById("grid-insert-column").disabled = !relational || !table || !writable;
+    document.getElementById("grid-copy-table").disabled = !table || state.queryResult;
+    const paste = document.getElementById("grid-paste-table");
+    paste.disabled = !canCreate || state.copiedTable?.connection !== ws.connection.id || state.pasting;
+    paste.title = state.copiedTable ? `Sumber: ${state.copiedTable.name} (${state.copiedTable.connectionName})` : "Salin tabel terlebih dahulu";
+    if (paged) {
+      const count = ws.data.rows.length;
+      document.getElementById("grid-range").textContent = count ? `${state.offset + 1}–${state.offset + count} dari ${ws.data.total_rows}` : "0 baris";
+      document.getElementById("grid-prev").disabled = !state.offset;
+      document.getElementById("grid-next").disabled = state.offset + count >= ws.data.total_rows;
+    }
+    if (titleEl) titleEl.textContent = state.queryResult ? "Hasil query" : ws.active_item || "Hasil query";
     const data = ws.data;
     if (!data) {
       thead.innerHTML = "";
@@ -534,7 +567,7 @@
         tdAct.appendChild(chip);
       }
 
-      if (ws.active_item && data.pk_columns && data.pk_columns.length > 0) {
+      if (writable && data.pk_columns?.length) {
         const delBtn = document.createElement("button");
         delBtn.type = "button";
         delBtn.className = "btn btn-sm btn-ghost";
@@ -546,7 +579,23 @@
           rebuildStagedMutations();
           renderDataGrid();
         });
+        delBtn.disabled = ws.connection.protection_mode !== "unrestricted";
+        if (delBtn.disabled) delBtn.title = "Pilih Unrestricted untuk menghapus baris";
         tdAct.appendChild(delBtn);
+        if (table && !isDeleted) {
+          const copy = document.createElement("button");
+          copy.type = "button";
+          copy.className = "btn btn-sm btn-ghost";
+          copy.textContent = "Duplikat";
+          copy.setAttribute("aria-label", `Duplikat baris ${rIdx + 1}`);
+          copy.onclick = () => {
+            state.insertedRows.unshift(Object.fromEntries(data.columns.flatMap((col, idx) =>
+              data.pk_columns.includes(col) ? [] : [[col, state.updatedCells.get(`${rIdx}:${col}`) ?? row[idx]]])));
+            rebuildStagedMutations();
+            renderDataGrid();
+          };
+          tdAct.appendChild(copy);
+        }
       } else {
         const ro = document.createElement("span");
         ro.className = "meta-text";
@@ -563,7 +612,7 @@
         const displayCell = stagedCell !== undefined ? stagedCell : origCell;
         const td = document.createElement("td");
 
-        const canEdit = Boolean(ws.active_item && data.pk_columns && data.pk_columns.length > 0 && !isDeleted);
+        const canEdit = Boolean(writable && data.pk_columns?.length && !isDeleted && origCell.kind !== "bytes");
         if (!canEdit) {
           const span = document.createElement("span");
           span.className = displayCell.kind === "null" ? "cell-null" : "";
@@ -620,35 +669,41 @@
     inp.value = currentCell.kind === "null" ? "NULL" : cellToDisplay(currentCell);
     inp.setAttribute("aria-label", `Ubah nilai ${colName}`);
 
-    const commitLocal = () => {
-      const parsed = parseInputToCell(inp.value, colType);
+    let finished = false;
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "btn btn-sm btn-ghost";
+    clear.textContent = "Set NULL";
+    clear.setAttribute("aria-label", `Set NULL pada ${colName}`);
+    const commitLocal = (parsed) => {
+      if (finished) return;
+      finished = true;
       const key = `${rIdx}:${colName}`;
-      if (JSON.stringify(parsed) === JSON.stringify(origCell)) {
-        state.updatedCells.delete(key);
-      } else {
-        state.updatedCells.set(key, parsed);
-      }
+      if (JSON.stringify(parsed) === JSON.stringify(origCell)) state.updatedCells.delete(key);
+      else state.updatedCells.set(key, parsed);
       rebuildStagedMutations();
       renderDataGrid();
     };
-
-    inp.addEventListener("blur", commitLocal);
-    inp.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") {
-        ev.preventDefault();
-        commitLocal();
-      } else if (ev.key === "Escape") {
-        ev.preventDefault();
-        renderDataGrid();
-      }
+    const value = () => inp.value === cellToDisplay(currentCell) ? currentCell :
+      parseInputToCell(inp.value, colType, false);
+    clear.onclick = () => commitLocal({ kind: "null" });
+    td.addEventListener("focusout", ev => {
+      if (!td.contains(ev.relatedTarget)) commitLocal(value());
     });
-    td.appendChild(inp);
+    inp.onkeydown = ev => {
+      if (ev.key === "Enter") { ev.preventDefault(); commitLocal(value()); }
+      if (ev.key === "Escape") { ev.preventDefault(); finished = true; renderDataGrid(); }
+    };
+    td.append(inp, clear);
     inp.focus();
     inp.select();
   }
 
   function renderStructure() {
     const st = state.workspace?.structure;
+    const isTable = state.workspace?.items.some(i => i.name === st?.item_name && i.item_type === "TABLE");
+    document.getElementById("rename-table").hidden = !isTable;
+    document.getElementById("rename-table").disabled = state.workspace?.connection.protection_mode === "read_only";
     const title = document.getElementById("structure-title");
     const colsBody = document.getElementById("structure-cols-body");
     const idxList = document.getElementById("structure-indexes-list");
@@ -676,6 +731,19 @@
         <td>${c.nullable ? "YES" : "NOT NULL"}</td>
         <td><code>${escapeHtml(c.default_value || "-")}</code></td>
       `;
+      const actions = tr.insertCell();
+      if (isTable) {
+        for (const [action, label] of [["rename_column", "Ubah nama"], ["drop_column", "Hapus"]]) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "btn btn-sm btn-ghost";
+          btn.textContent = label;
+          btn.setAttribute("aria-label", `${label} kolom ${c.name}`);
+          btn.disabled = state.workspace.connection.protection_mode === "read_only" || (action === "drop_column" && state.workspace.connection.protection_mode !== "unrestricted");
+          btn.onclick = () => changeSchema(action, c.name);
+          actions.appendChild(btn);
+        }
+      }
       colsBody.appendChild(tr);
     }
 
@@ -818,8 +886,34 @@
   }
 
   // --- API Actions ---
+  function canLeaveGrid() {
+    return !state.saving && ((!state.insertedRows.length && !state.stagedMutations.length) || confirm("Buang perubahan yang belum disimpan?"));
+  }
+
+  async function changeSchema(action, column) {
+    const ws = state.workspace;
+    if (!ws || state.stagedMutations.length || state.insertedRows.length) {
+      showBanner("Simpan atau batalkan perubahan grid terlebih dahulu.", "error");
+      return;
+    }
+    const payload = { action, table_name: ws.active_item };
+    if (column) payload.column_name = column;
+    if (action === "drop_column") {
+      if (!confirm(`Hapus kolom ${column} beserta seluruh nilainya dari ${ws.active_item}?`)) return;
+    } else {
+      const name = prompt("Nama baru", column || ws.active_item)?.trim();
+      if (!name || name === (column || ws.active_item)) return;
+      payload.new_name = name;
+    }
+    try {
+      await apiJson(`/api/connections/${encodeURIComponent(ws.connection.id)}/ddl`, { method: "POST", body: JSON.stringify(payload) });
+      if (state.workspace === ws) await loadWorkspaceItem(action === "rename_table" ? payload.new_name : ws.active_item);
+    } catch (err) { showBanner(err.message, "error"); }
+  }
+
   async function switchConnection(connId) {
-    if (!connId) return;
+    if (!connId || !canLeaveGrid()) { renderConnections(); return; }
+    const requestId = ++state.requestId;
     clearBanner();
     clearStagedChanges();
     state.sortCol = null;
@@ -831,6 +925,11 @@
 
     try {
       const ws = await apiJson(`/api/connections/${encodeURIComponent(connId)}/workspace`);
+      if (requestId !== state.requestId) return;
+      state.offset = 0;
+      state.limit = 100;
+      document.getElementById("grid-limit").value = "100";
+      state.queryResult = false;
       state.workspace = ws;
       renderConnections();
       renderWorkspace();
@@ -839,12 +938,13 @@
     }
   }
 
-  async function loadWorkspaceItem(itemName) {
-    if (!state.workspace) return;
+  async function loadWorkspaceItem(itemName, offset = 0, limit = state.limit) {
+    if (!state.workspace || !canLeaveGrid()) return;
+    const requestId = ++state.requestId;
     clearBanner();
     clearStagedChanges();
     const connId = state.workspace.connection.id;
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({offset, limit});
     if (itemName) params.set("item", itemName);
     if (state.filterText) params.set("filter", state.filterText);
     if (state.sortCol) {
@@ -853,6 +953,10 @@
     }
     try {
       const ws = await apiJson(`/api/connections/${encodeURIComponent(connId)}/workspace?${params.toString()}`);
+      if (requestId !== state.requestId) return;
+      state.offset = offset;
+      state.limit = limit;
+      state.queryResult = false;
       state.workspace = ws;
       renderWorkspace();
     } catch (err) {
@@ -873,7 +977,8 @@
   }
 
   async function runQuery(overrideSql) {
-    if (!state.workspace) return;
+    if (!state.workspace || !canLeaveGrid()) return;
+    const requestId = ++state.requestId;
     clearBanner();
     const editor = document.getElementById("sql-editor");
     const query = (overrideSql !== undefined ? overrideSql : editor?.value || "").trim();
@@ -886,6 +991,8 @@
         method: "POST",
         body: JSON.stringify({ item: state.workspace.active_item, query }),
       });
+      if (requestId !== state.requestId) return;
+      state.queryResult = true;
       clearStagedChanges();
       state.workspace.data = res;
       switchTab("data");
@@ -899,7 +1006,9 @@
   }
 
   async function commitStaged() {
-    if (!state.workspace || state.stagedMutations.length === 0) return;
+    if (state.saving || !state.workspace || state.stagedMutations.length === 0) return;
+    state.saving = true;
+    document.getElementById("main-workspace").inert = true;
     clearBanner();
     try {
       const report = await apiJson(`/api/connections/${encodeURIComponent(state.workspace.connection.id)}/mutate`, {
@@ -908,7 +1017,8 @@
       });
       closeModal("preview-modal");
       clearStagedChanges();
-      await loadWorkspaceItem(state.workspace.active_item);
+      state.saving = false;
+      await loadWorkspaceItem(state.workspace.active_item, state.offset);
       await refreshHistory();
       showBanner(
         `Berhasil commit ${report.committed_count} perubahan dalam satu transaksi (${report.duration_ms} ms).`,
@@ -916,6 +1026,9 @@
       );
     } catch (err) {
       showBanner(`Gagal commit transaksi: ${err.message}`, "error");
+    } finally {
+      state.saving = false;
+      document.getElementById("main-workspace").inert = false;
     }
   }
 
@@ -1057,7 +1170,9 @@
           method: "PUT",
           body: JSON.stringify({ protection_mode: nextMode }),
         });
+        if (state.workspace.connection.id !== updated.id) return;
         state.workspace.connection = updated;
+        renderWorkspace();
         const idx = state.connections.findIndex((c) => c.id === updated.id);
         if (idx >= 0) state.connections[idx] = updated;
         renderConnections();
@@ -1229,6 +1344,35 @@
       }
     });
 
+    document.getElementById("grid-insert-table").onclick = () => openModal("ddl-modal");
+    document.getElementById("grid-insert-column").onclick = () => {
+      switchTab("structure");
+      document.getElementById("addcol-name").focus();
+    };
+    document.getElementById("grid-copy-table").onclick = () => {
+      const ws = state.workspace;
+      state.copiedTable = {connection: ws.connection.id, connectionName: ws.connection.name, name: ws.active_item};
+      renderDataGrid();
+      showBanner(`Sumber salinan: ${ws.active_item}. Pilih Tempel tabel untuk membuat tabel baru.`, "info");
+    };
+    document.getElementById("grid-paste-table").onclick = async () => {
+      const source = state.copiedTable;
+      if (state.pasting || !source || state.workspace.connection.id !== source.connection) return;
+      if (state.insertedRows.length || state.stagedMutations.length) {
+        showBanner("Simpan atau batalkan perubahan grid sebelum menempel tabel.", "error");
+        return;
+      }
+      const name = prompt(`Salin seluruh data dan primary key dari ${source.name}. Nama tabel baru:`, `${source.name}_salinan`)?.trim();
+      if (!name) return;
+      state.pasting = true;
+      renderDataGrid();
+      try {
+        await apiJson(`/api/connections/${encodeURIComponent(source.connection)}/ddl`, {method:"POST", body:JSON.stringify({action:"copy_table",source_table:source.name,table_name:name})});
+        if (state.workspace.connection.id === source.connection) await loadWorkspaceItem(name);
+        showBanner(`Tabel ${name} berhasil dibuat dari ${source.name}.`, "success");
+      } catch (err) { showBanner(err.message, "error"); }
+      finally { state.pasting = false; renderDataGrid(); }
+    };
     document.getElementById("btn-add-row")?.addEventListener("click", () => {
       if (!state.workspace?.data || !state.workspace?.active_item) {
         showBanner("Buka tabel atau koleksi terlebih dahulu untuk menambah baris.", "error");
@@ -1265,6 +1409,22 @@
       });
     });
 
+    const toolsButton = document.getElementById("toggle-tools");
+    toolsButton.onclick = () => {
+      const open = toolsButton.getAttribute("aria-expanded") !== "true";
+      toolsButton.setAttribute("aria-expanded", String(open));
+      document.getElementById("studio-actions").classList.toggle("tools-open", open);
+    };
+    document.getElementById("rename-table").onclick = () => changeSchema("rename_table");
+    document.getElementById("grid-prev").onclick = () => loadWorkspaceItem(state.workspace.active_item, Math.max(0, state.offset - state.limit));
+    document.getElementById("grid-next").onclick = () => loadWorkspaceItem(state.workspace.active_item, state.offset + state.limit);
+    document.getElementById("grid-limit").onchange = ev => loadWorkspaceItem(state.workspace.active_item, 0, Number(ev.target.value));
+    document.getElementById("toggle-editor").onclick = ev => {
+      const pane = document.getElementById("query-pane");
+      pane.hidden = !pane.hidden;
+      ev.currentTarget.textContent = pane.hidden ? "Tampilkan editor" : "Sembunyikan editor";
+      ev.currentTarget.setAttribute("aria-expanded", String(!pane.hidden));
+    };
     // Structure & DDL
     document.getElementById("form-add-column")?.addEventListener("submit", async (ev) => {
       ev.preventDefault();
@@ -1323,6 +1483,7 @@
 
     document.getElementById("btn-truncate-item")?.addEventListener("click", async () => {
       if (!state.workspace?.active_item) return;
+      if (!confirm(`Kosongkan seluruh isi ${state.workspace.active_item}?`)) return;
       try {
         const rep = await apiJson(`/api/connections/${encodeURIComponent(state.workspace.connection.id)}/ddl`, {
           method: "POST",
@@ -1337,6 +1498,7 @@
 
     document.getElementById("btn-drop-item")?.addEventListener("click", async () => {
       if (!state.workspace?.active_item) return;
+      if (!confirm(`Hapus objek ${state.workspace.active_item}?`)) return;
       try {
         const rep = await apiJson(`/api/connections/${encodeURIComponent(state.workspace.connection.id)}/ddl`, {
           method: "POST",
@@ -1372,7 +1534,7 @@
     });
     document.querySelectorAll(".modal-backdrop").forEach((bd) => {
       bd.addEventListener("click", (ev) => {
-        if (ev.target === bd) bd.hidden = true;
+        if (ev.target === bd) closeModal(bd.id);
       });
     });
 
@@ -1457,6 +1619,18 @@
 
     // Global keyboard shortcuts
     document.addEventListener("keydown", (ev) => {
+      const modal = document.querySelector(".modal-backdrop:not([hidden])");
+      if (modal) {
+        if (ev.key === "Tab") {
+          const controls = [...modal.querySelectorAll("button, input, select, textarea, [href]")].filter(el => !el.disabled && el.getClientRects().length);
+          const end = ev.shiftKey ? controls[0] : controls.at(-1);
+          if (end && document.activeElement === end) {
+            ev.preventDefault();
+            (ev.shiftKey ? controls.at(-1) : controls[0]).focus();
+          }
+        } else if (ev.key === "Escape") closeModal(modal.id);
+        return;
+      }
       if (ev.key === "Escape") {
         closeAllModals();
       } else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "k") {
@@ -1849,6 +2023,7 @@
       }
     }
     bindEvents();
+    if (window.matchMedia("(max-width: 600px)").matches) document.getElementById("toggle-editor").click();
     renderConnections();
     renderWorkspace();
     renderHistory();

@@ -87,7 +87,8 @@ fn StudioShell(
                         </div>
                     </div>
 
-                    <nav class="header-actions" aria-label="Perintah Studio Utama">
+                    <button id="toggle-tools" class="btn btn-secondary" type="button" aria-expanded="false" aria-controls="studio-actions">"Alat studio"</button>
+                    <nav id="studio-actions" class="header-actions" aria-label="Perintah Studio Utama">
                         <button type="button" id="btn-discover-server" class="btn btn-primary" title="Pindai semua engine dan database yang terpasang di server ini">
                             <StudioIcon kind="scan" />
                             <span>"Deteksi DB"</span>
@@ -102,11 +103,11 @@ fn StudioShell(
                         </button>
                         <button type="button" id="btn-new-connection" class="btn btn-secondary">
                             <StudioIcon kind="plus" />
-                            <span>"+ Koneksi"</span>
+                            <span>"Koneksi baru"</span>
                         </button>
                         <button type="button" id="btn-new-table" class="btn btn-secondary">
                             <StudioIcon kind="plus" />
-                            <span>"+ Tabel / Koleksi"</span>
+                            <span>"Buat objek"</span>
                         </button>
                         <button type="button" id="btn-theme-toggle" class="btn btn-secondary" aria-pressed="false">
                             <StudioIcon kind="theme" />
@@ -152,7 +153,11 @@ fn StudioShell(
                     </aside>
 
                     <main id="main-workspace" class="workspace-main">
-                        <section class="query-pane" aria-label="Editor Query dan Visual Builder">
+                        <div class="workspace-heading">
+                            <div><p class="workspace-path" id="workspace-path"></p><h2 id="workspace-object">{active_item_name.clone()}</h2></div>
+                            <button type="button" class="btn btn-secondary btn-sm" id="toggle-editor" aria-expanded="true" aria-controls="query-pane">"Sembunyikan editor"</button>
+                        </div>
+                        <section id="query-pane" class="query-pane" aria-label="Editor Query dan Visual Builder">
                             <div class="query-toolbar">
                                 <div class="query-toolbar-left">
                                     <h2 class="panel-heading" id="editor-mode-label">"SQL & Command Console"</h2>
@@ -170,7 +175,7 @@ fn StudioShell(
                                     </button>
                                     <button type="button" id="btn-format-sql" class="btn btn-secondary" title="Format SQL/JSON via Rust WASM">
                                         <StudioIcon kind="code" />
-                                        <span>"Format (WASM)"</span>
+                                        <span>"Format SQL"</span>
                                     </button>
                                     <button type="button" id="btn-explain-query" class="btn btn-secondary">
                                         "Explain Plan"
@@ -276,7 +281,11 @@ fn StudioShell(
                                             placeholder="Saring cepat (nilai / JSON / key)..."
                                         />
                                         <button type="button" id="btn-apply-filter" class="btn btn-secondary btn-sm">"Saring"</button>
-                                        <button type="button" id="btn-add-row" class="btn btn-secondary btn-sm">"+ Tambah Baris"</button>
+                                        <button type="button" id="grid-insert-table" class="btn btn-secondary btn-sm">"Sisip tabel"</button>
+                                        <button type="button" id="grid-insert-column" class="btn btn-secondary btn-sm">"Sisip kolom"</button>
+                                        <button type="button" id="grid-copy-table" class="btn btn-secondary btn-sm" title="Salin seluruh tabel untuk ditempel pada koneksi ini">"Salin tabel"</button>
+                                        <button type="button" id="grid-paste-table" class="btn btn-secondary btn-sm" disabled>"Tempel tabel"</button>
+                                        <button type="button" id="btn-add-row" class="btn btn-secondary btn-sm">"Sisip baris"</button>
                                     </div>
                                     <div class="data-controls-right">
                                         <span id="query-meta-text" class="meta-text">"Memuat data..."</span>
@@ -297,6 +306,13 @@ fn StudioShell(
                                     </table>
                                 </div>
 
+                                <div id="grid-pages" class="grid-pages">
+                                    <label for="grid-limit">"Baris per halaman"</label>
+                                    <select id="grid-limit" class="select-control"><option>"25"</option><option>"50"</option><option selected>"100"</option><option>"250"</option></select>
+                                    <span id="grid-range" aria-live="polite"></span>
+                                    <button id="grid-prev" class="btn btn-secondary btn-sm" type="button">"Sebelumnya"</button>
+                                    <button id="grid-next" class="btn btn-secondary btn-sm" type="button">"Berikutnya"</button>
+                                </div>
                                 <div id="document-cards-view" class="doc-cards-grid" hidden></div>
                             </div>
 
@@ -304,6 +320,7 @@ fn StudioShell(
                                 <div class="structure-toolbar">
                                     <h3 class="section-subtitle" id="structure-title">"Struktur Objek"</h3>
                                     <div class="structure-actions">
+                                        <button type="button" id="rename-table" class="btn btn-secondary btn-sm">"Ubah nama tabel"</button>
                                         <button type="button" id="btn-truncate-item" class="btn btn-danger-outline btn-sm">"Kosongkan Isi (Truncate)"</button>
                                         <button type="button" id="btn-drop-item" class="btn btn-danger-outline btn-sm">"Hapus Objek (Drop)"</button>
                                     </div>
@@ -320,7 +337,7 @@ fn StudioShell(
                                                         <th>"Tipe"</th>
                                                         <th>"Kunci"</th>
                                                         <th>"Nullable"</th>
-                                                        <th>"Default"</th>
+                                                        <th>"Default"</th><th>"Tindakan"</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody id="structure-cols-body"></tbody>
@@ -713,7 +730,7 @@ pub async fn index_page(State(state): State<AppState>) -> AppResult<Html<String>
     // Escape closing </script> sequences cleanly inside inline JSON tag
     let initial_json = serde_json::to_string(&bootstrap)
         .unwrap_or_else(|_| "{}".to_string())
-        .replace("</", "<\\/");
+        .replace('<', "\\u003c");
 
     let rendered = view! {
         <StudioShell

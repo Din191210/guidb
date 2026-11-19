@@ -1,3 +1,4 @@
+use super::ddl_ident;
 use crate::drivers::{DataQueryOptions, DatabaseAdapter};
 use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
@@ -8,6 +9,7 @@ use guidb_shared::{
     TestConnectionResponse,
 };
 use sqlx::sqlite::{SqlitePool, SqliteRow};
+use sqlx::AssertSqlSafe;
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 use std::collections::HashSet;
 use std::time::Instant;
@@ -67,9 +69,9 @@ pub fn decode_sqlite_row(row: &SqliteRow) -> Vec<CellValue> {
 }
 
 fn bind_cell<'q>(
-    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     val: &'q CellValue,
-) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
     match val {
         CellValue::Null => q.bind(Option::<String>::None),
         CellValue::Bool(b) => q.bind(if *b { 1_i64 } else { 0_i64 }),
@@ -113,7 +115,7 @@ impl DatabaseAdapter for SqliteAdapter {
             let item_type: String = r.get("type");
             let quoted = quote_ident(&name, EngineKind::Sqlite);
             let count_sql = format!("SELECT COUNT(*) FROM {quoted}");
-            let row_count: i64 = sqlx::query_scalar(&count_sql)
+            let row_count: i64 = sqlx::query_scalar(AssertSqlSafe(count_sql))
                 .fetch_one(&self.pool)
                 .await
                 .unwrap_or(0);
@@ -141,7 +143,7 @@ impl DatabaseAdapter for SqliteAdapter {
         let ddl: String = master_row.get("ddl");
         let quoted = quote_ident(&valid_name, EngineKind::Sqlite);
 
-        let col_rows = sqlx::query(&format!("PRAGMA table_info({quoted})"))
+        let col_rows = sqlx::query(AssertSqlSafe(format!("PRAGMA table_info({quoted})")))
             .fetch_all(&self.pool)
             .await
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -157,7 +159,7 @@ impl DatabaseAdapter for SqliteAdapter {
             })
             .collect();
 
-        let idx_rows = sqlx::query(&format!("PRAGMA index_list({quoted})"))
+        let idx_rows = sqlx::query(AssertSqlSafe(format!("PRAGMA index_list({quoted})")))
             .fetch_all(&self.pool)
             .await
             .unwrap_or_default();
@@ -170,7 +172,7 @@ impl DatabaseAdapter for SqliteAdapter {
             }
             let unique = idx.get::<i64, _>("unique") != 0;
             let iq = quote_ident(&idx_name, EngineKind::Sqlite);
-            let idx_cols = sqlx::query(&format!("PRAGMA index_info({iq})"))
+            let idx_cols = sqlx::query(AssertSqlSafe(format!("PRAGMA index_info({iq})")))
                 .fetch_all(&self.pool)
                 .await
                 .unwrap_or_default()
@@ -184,7 +186,7 @@ impl DatabaseAdapter for SqliteAdapter {
             });
         }
 
-        let fk_rows = sqlx::query(&format!("PRAGMA foreign_key_list({quoted})"))
+        let fk_rows = sqlx::query(AssertSqlSafe(format!("PRAGMA foreign_key_list({quoted})")))
             .fetch_all(&self.pool)
             .await
             .unwrap_or_default();
@@ -264,6 +266,14 @@ impl DatabaseAdapter for SqliteAdapter {
                 };
                 format!(" ORDER BY {} {dir}", quote_ident(col, EngineKind::Sqlite))
             }
+            _ if !pk_columns.is_empty() => format!(
+                " ORDER BY {}",
+                pk_columns
+                    .iter()
+                    .map(|c| quote_ident(c, EngineKind::Sqlite))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             _ => String::new(),
         };
 
@@ -272,13 +282,13 @@ impl DatabaseAdapter for SqliteAdapter {
 
         let count_sql = format!("SELECT COUNT(*) FROM {quoted_table}{where_clause}");
         let total_rows: i64 = if let Some(ref pat) = filter_pattern {
-            sqlx::query_scalar(&count_sql)
+            sqlx::query_scalar(AssertSqlSafe(count_sql))
                 .bind(pat)
                 .fetch_one(&self.pool)
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?
         } else {
-            sqlx::query_scalar(&count_sql)
+            sqlx::query_scalar(AssertSqlSafe(count_sql))
                 .fetch_one(&self.pool)
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?
@@ -287,13 +297,13 @@ impl DatabaseAdapter for SqliteAdapter {
         let data_sql =
             format!("SELECT * FROM {quoted_table}{where_clause}{order_clause} LIMIT {limit} OFFSET {offset}");
         let rows_raw = if let Some(ref pat) = filter_pattern {
-            sqlx::query(&data_sql)
+            sqlx::query(AssertSqlSafe(data_sql))
                 .bind(pat)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?
         } else {
-            sqlx::query(&data_sql)
+            sqlx::query(AssertSqlSafe(data_sql))
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?
@@ -325,7 +335,7 @@ impl DatabaseAdapter for SqliteAdapter {
             || upper.starts_with("EXPLAIN");
 
         if returns_rows {
-            let rows_raw = sqlx::query(trimmed)
+            let rows_raw = sqlx::query(AssertSqlSafe(trimmed))
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?;
@@ -352,7 +362,7 @@ impl DatabaseAdapter for SqliteAdapter {
             });
         }
 
-        let res = sqlx::raw_sql(trimmed)
+        let res = sqlx::raw_sql(AssertSqlSafe(trimmed))
             .execute(&self.pool)
             .await
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -407,7 +417,7 @@ impl DatabaseAdapter for SqliteAdapter {
                         cols.join(", "),
                         placeholders.join(", ")
                     );
-                    let mut q = sqlx::query(&sql);
+                    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
                     for val in values.values() {
                         q = bind_cell(q, val);
                     }
@@ -458,7 +468,7 @@ impl DatabaseAdapter for SqliteAdapter {
                         set_parts.join(", "),
                         where_parts.join(" AND ")
                     );
-                    let mut q = sqlx::query(&sql);
+                    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
                     for val in changes.values() {
                         q = bind_cell(q, val);
                     }
@@ -467,9 +477,16 @@ impl DatabaseAdapter for SqliteAdapter {
                             q = bind_cell(q, val);
                         }
                     }
-                    q.execute(&mut *tx)
+                    let affected = q
+                        .execute(&mut *tx)
                         .await
-                        .map_err(|e| AppError::Database(e.to_string()))?;
+                        .map_err(|e| AppError::Database(e.to_string()))?
+                        .rows_affected();
+                    if affected != 1 {
+                        return Err(AppError::BadRequest(
+                            "Baris telah berubah atau kunci tidak unik. Muat ulang tabel.".into(),
+                        ));
+                    }
                 }
                 StagedMutation::Delete { item, pk_match } => {
                     let table = validate_identifier(item).map_err(AppError::BadRequest)?;
@@ -500,15 +517,22 @@ impl DatabaseAdapter for SqliteAdapter {
                         quote_ident(&table, EngineKind::Sqlite),
                         where_parts.join(" AND ")
                     );
-                    let mut q = sqlx::query(&sql);
+                    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
                     for val in pk_match.values() {
                         if !matches!(val, CellValue::Null) {
                             q = bind_cell(q, val);
                         }
                     }
-                    q.execute(&mut *tx)
+                    let affected = q
+                        .execute(&mut *tx)
                         .await
-                        .map_err(|e| AppError::Database(e.to_string()))?;
+                        .map_err(|e| AppError::Database(e.to_string()))?
+                        .rows_affected();
+                    if affected != 1 {
+                        return Err(AppError::BadRequest(
+                            "Baris telah berubah atau kunci tidak unik. Muat ulang tabel.".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -526,73 +550,114 @@ impl DatabaseAdapter for SqliteAdapter {
 
     async fn execute_ddl(&self, action: DdlAction) -> AppResult<DdlReport> {
         let sql = match action {
+            DdlAction::CopyTable {
+                source_table,
+                table_name,
+            } => {
+                let engine = EngineKind::Sqlite;
+                let source = super::ddl_ident(&source_table, engine)?;
+                let target = super::ddl_ident(&table_name, engine)?;
+                let structure = sqlx::query("SELECT name,type,[notnull] AS required,pk FROM pragma_table_xinfo(?) WHERE hidden != 1 ORDER BY cid").bind(&source_table).fetch_all(&self.pool).await.map_err(|e| AppError::Database(e.to_string()))?;
+                let primary = structure
+                    .iter()
+                    .filter(|c| c.get::<i64, _>("pk") > 0)
+                    .map(|c| quote_ident(c.get("name"), engine))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut definitions = structure
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "{} {}{}",
+                            quote_ident(c.get("name"), engine),
+                            quote_ident(c.get("type"), engine),
+                            if c.get::<i64, _>("required") == 0 {
+                                ""
+                            } else {
+                                " NOT NULL"
+                            }
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if !primary.is_empty() {
+                    definitions.push(format!("PRIMARY KEY ({primary})"));
+                }
+                let columns = structure
+                    .iter()
+                    .map(|c| quote_ident(c.get("name"), engine))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let statements = vec![
+                    format!("CREATE TABLE {target} ({})", definitions.join(", ")),
+                    format!("INSERT INTO {target} ({columns}) SELECT {columns} FROM {source}"),
+                ];
+                let mut tx = self
+                    .pool
+                    .begin()
+                    .await
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                for sql in &statements {
+                    sqlx::query(AssertSqlSafe(sql.as_str()))
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| AppError::Database(e.to_string()))?;
+                }
+                tx.commit()
+                    .await
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                return Ok(DdlReport {
+                    executed_sql: statements.join("; "),
+                    message: format!("Tabel {table_name} berhasil disalin."),
+                });
+            }
             DdlAction::CreateTable {
                 table_name,
                 columns,
             } => {
-                let valid_table = validate_identifier(&table_name).map_err(AppError::BadRequest)?;
                 if columns.is_empty() {
-                    return Err(AppError::BadRequest(
-                        "At least one column is required".into(),
-                    ));
+                    return Err(AppError::BadRequest("Tabel memerlukan kolom.".into()));
                 }
-                let mut col_defs = Vec::with_capacity(columns.len());
-                for c in columns {
-                    let cname = validate_identifier(&c.name).map_err(AppError::BadRequest)?;
-                    let ctype = validate_sql_type(&c.data_type)?;
-                    let mut def = format!("{} {ctype}", quote_ident(&cname, EngineKind::Sqlite));
-                    if c.is_pk {
-                        def.push_str(" PRIMARY KEY");
-                        if ctype == "INTEGER" {
-                            def.push_str(" AUTOINCREMENT");
-                        }
-                    } else if !c.nullable {
-                        def.push_str(" NOT NULL");
-                    }
-                    if let Some(d) = c
-                        .default_value
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                    {
-                        def.push_str(&format!(" DEFAULT {}", sanitize_default(d)));
-                    }
-                    col_defs.push(def);
-                }
+                let definitions = columns
+                    .iter()
+                    .map(|c| super::column_definition(c, EngineKind::Sqlite))
+                    .collect::<AppResult<Vec<_>>>()?;
                 format!(
-                    "CREATE TABLE {} (\n  {}\n);",
-                    quote_ident(&valid_table, EngineKind::Sqlite),
-                    col_defs.join(",\n  ")
+                    "CREATE TABLE {} ({})",
+                    ddl_ident(&table_name, EngineKind::Sqlite)?,
+                    definitions.join(", ")
                 )
             }
-            DdlAction::AddColumn { table_name, column } => {
-                let valid_table = validate_identifier(&table_name).map_err(AppError::BadRequest)?;
-                let cname = validate_identifier(&column.name).map_err(AppError::BadRequest)?;
-                let ctype = validate_sql_type(&column.data_type)?;
-                let mut def = format!(
-                    "ALTER TABLE {} ADD COLUMN {} {ctype}",
-                    quote_ident(&valid_table, EngineKind::Sqlite),
-                    quote_ident(&cname, EngineKind::Sqlite)
-                );
-                if !column.nullable {
-                    let fallback = column
-                        .default_value
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(if ctype.contains("INT") { "0" } else { "''" });
-                    def.push_str(&format!(" NOT NULL DEFAULT {}", sanitize_default(fallback)));
-                } else if let Some(d) = column
-                    .default_value
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    def.push_str(&format!(" DEFAULT {}", sanitize_default(d)));
-                }
-                def.push(';');
-                def
-            }
+            DdlAction::RenameColumn {
+                table_name,
+                column_name,
+                new_name,
+            } => format!(
+                "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                ddl_ident(&table_name, EngineKind::Sqlite)?,
+                ddl_ident(&column_name, EngineKind::Sqlite)?,
+                ddl_ident(&new_name, EngineKind::Sqlite)?
+            ),
+            DdlAction::DropColumn {
+                table_name,
+                column_name,
+            } => format!(
+                "ALTER TABLE {} DROP COLUMN {}",
+                ddl_ident(&table_name, EngineKind::Sqlite)?,
+                ddl_ident(&column_name, EngineKind::Sqlite)?
+            ),
+            DdlAction::RenameTable {
+                table_name,
+                new_name,
+            } => format!(
+                "ALTER TABLE {} RENAME TO {}",
+                ddl_ident(&table_name, EngineKind::Sqlite)?,
+                ddl_ident(&new_name, EngineKind::Sqlite)?
+            ),
+            DdlAction::AddColumn { table_name, column } => format!(
+                "ALTER TABLE {} ADD COLUMN {}",
+                ddl_ident(&table_name, EngineKind::Sqlite)?,
+                super::column_definition(&column, EngineKind::Sqlite)?
+            ),
             DdlAction::CreateIndex {
                 table_name,
                 index_name,
@@ -633,7 +698,7 @@ impl DatabaseAdapter for SqliteAdapter {
             }
         };
 
-        sqlx::raw_sql(&sql)
+        sqlx::raw_sql(AssertSqlSafe(sql.as_str()))
             .execute(&self.pool)
             .await
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -644,11 +709,10 @@ impl DatabaseAdapter for SqliteAdapter {
         })
     }
 
-    async fn build_erd(&self) -> AppResult<ErdGraph> {
-        let items = self.list_items().await?;
+    async fn build_erd(&self, items: &[ItemInfo]) -> AppResult<ErdGraph> {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
-        for item in items.into_iter().filter(|i| i.item_type == "TABLE") {
+        for item in items.iter().filter(|i| i.item_type == "TABLE") {
             let st = self.inspect_structure(&item.name).await?;
             for fk in &st.foreign_keys {
                 edges.push(ErdEdge {
@@ -665,49 +729,5 @@ impl DatabaseAdapter for SqliteAdapter {
             });
         }
         Ok(ErdGraph { nodes, edges })
-    }
-}
-
-fn validate_sql_type(raw: &str) -> AppResult<String> {
-    let trimmed = raw.trim().to_uppercase();
-    let allowed = [
-        "INTEGER",
-        "INT",
-        "BIGINT",
-        "TEXT",
-        "VARCHAR(255)",
-        "REAL",
-        "FLOAT",
-        "NUMERIC",
-        "BOOLEAN",
-        "BLOB",
-        "TIMESTAMP",
-        "JSON",
-    ];
-    if allowed.contains(&trimmed.as_str())
-        || (trimmed
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '(' | ')' | ',' | ' ' | '_'))
-            && !trimmed.is_empty()
-            && trimmed.len() <= 32)
-    {
-        Ok(trimmed)
-    } else {
-        Err(AppError::BadRequest(format!(
-            "Unsupported data type '{raw}'"
-        )))
-    }
-}
-
-fn sanitize_default(raw: &str) -> String {
-    let t = raw.trim();
-    if t.eq_ignore_ascii_case("NULL")
-        || t.eq_ignore_ascii_case("CURRENT_TIMESTAMP")
-        || t.parse::<f64>().is_ok()
-        || (t.starts_with('\'') && t.ends_with('\''))
-    {
-        t.to_string()
-    } else {
-        format!("'{}'", t.replace('\'', "''"))
     }
 }

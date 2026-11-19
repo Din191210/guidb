@@ -119,7 +119,9 @@ pub fn check_ddl_safety(mode: ProtectionMode, action: &DdlAction) -> AppResult<(
     if mode == ProtectionMode::SafeGuard
         && matches!(
             action,
-            DdlAction::TruncateItem { .. } | DdlAction::DropItem { .. }
+            DdlAction::TruncateItem { .. }
+                | DdlAction::DropItem { .. }
+                | DdlAction::DropColumn { .. }
         )
     {
         return Err(AppError::BadRequest(

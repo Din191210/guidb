@@ -90,6 +90,16 @@ impl ProtectionMode {
     }
 }
 
+fn public_target<S: serde::Serializer>(target: &str, serializer: S) -> Result<S::Ok, S::Error> {
+    if let Some((scheme, location)) = target.split_once("://") {
+        let endpoint = location.split(['?', '#']).next().unwrap_or_default();
+        let address = endpoint.rsplit('@').next().unwrap_or_default();
+        serializer.serialize_str(&format!("{scheme}://{address}"))
+    } else {
+        serializer.serialize_str(target)
+    }
+}
+
 /// Saved connection profile stored in the persistent catalog database.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionProfile {
@@ -97,6 +107,7 @@ pub struct ConnectionProfile {
     pub name: String,
     pub engine: EngineKind,
     pub environment: EnvironmentKind,
+    #[serde(serialize_with = "public_target")]
     pub target: String,
     pub protection_mode: ProtectionMode,
     pub is_builtin: bool,
@@ -316,9 +327,26 @@ pub struct ExecuteQueryRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum DdlAction {
+    CopyTable {
+        source_table: String,
+        table_name: String,
+    },
     CreateTable {
         table_name: String,
         columns: Vec<NewColumnSpec>,
+    },
+    RenameColumn {
+        table_name: String,
+        column_name: String,
+        new_name: String,
+    },
+    DropColumn {
+        table_name: String,
+        column_name: String,
+    },
+    RenameTable {
+        table_name: String,
+        new_name: String,
     },
     AddColumn {
         table_name: String,
@@ -459,6 +487,7 @@ pub struct DiscoveredDatabase {
     pub size_label: String,
     pub object_count: i64,
     pub engine: EngineKind,
+    #[serde(serialize_with = "public_target")]
     pub connection_target: String,
     pub already_registered: bool,
     pub existing_connection_id: Option<String>,

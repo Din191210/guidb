@@ -1,3 +1,4 @@
+use super::ddl_ident;
 use crate::drivers::{DataQueryOptions, DatabaseAdapter};
 use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
@@ -8,17 +9,19 @@ use guidb_shared::{
     TestConnectionResponse,
 };
 use sqlx::mysql::{MySqlPool, MySqlRow};
+use sqlx::AssertSqlSafe;
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 use std::collections::HashSet;
 use std::time::Instant;
 
 pub struct MysqlAdapter {
     pool: MySqlPool,
+    read_only: bool,
 }
 
 impl MysqlAdapter {
-    pub fn new(pool: MySqlPool) -> Self {
-        Self { pool }
+    pub fn new(pool: MySqlPool, read_only: bool) -> Self {
+        Self { pool, read_only }
     }
 }
 
@@ -105,7 +108,7 @@ impl DatabaseAdapter for MysqlAdapter {
             let name: String = r.get("TABLE_NAME");
             let tt: String = r.get("TABLE_TYPE");
             let q = quote_ident(&name, EngineKind::Mysql);
-            let cnt: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {q}"))
+            let cnt: i64 = sqlx::query_scalar(AssertSqlSafe(format!("SELECT COUNT(*) FROM {q}")))
                 .fetch_one(&self.pool)
                 .await
                 .unwrap_or(0);
@@ -257,13 +260,21 @@ impl DatabaseAdapter for MysqlAdapter {
                 };
                 format!(" ORDER BY {} {dir}", quote_ident(c, EngineKind::Mysql))
             }
+            _ if !pk_columns.is_empty() => format!(
+                " ORDER BY {}",
+                pk_columns
+                    .iter()
+                    .map(|c| quote_ident(c, EngineKind::Mysql))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             _ => String::new(),
         };
 
         let limit = opts.limit.clamp(1, 500);
         let offset = opts.offset.max(0);
         let count_sql = format!("SELECT COUNT(*) FROM {qt}{where_clause}");
-        let mut cq = sqlx::query_scalar::<_, i64>(&count_sql);
+        let mut cq = sqlx::query_scalar::<_, i64>(AssertSqlSafe(count_sql));
         if let Some(ref pat) = filter_pat {
             for _ in &col_names {
                 cq = cq.bind(pat);
@@ -276,7 +287,7 @@ impl DatabaseAdapter for MysqlAdapter {
 
         let data_sql =
             format!("SELECT * FROM {qt}{where_clause}{order_clause} LIMIT {limit} OFFSET {offset}");
-        let mut dq = sqlx::query(&data_sql);
+        let mut dq = sqlx::query(AssertSqlSafe(data_sql));
         if let Some(ref pat) = filter_pat {
             for _ in &col_names {
                 dq = dq.bind(pat);
@@ -303,15 +314,32 @@ impl DatabaseAdapter for MysqlAdapter {
         let start = Instant::now();
         let trimmed = query.trim();
         let upper = trimmed.to_uppercase();
-        if upper.starts_with("SELECT")
+        if self.read_only
+            || upper.starts_with("SELECT")
             || upper.starts_with("SHOW")
             || upper.starts_with("EXPLAIN")
             || upper.starts_with("DESCRIBE")
         {
-            let rows_raw = sqlx::query(trimmed)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+            let rows_raw = if self.read_only {
+                let mut tx = self
+                    .pool
+                    .begin_with("START TRANSACTION READ ONLY")
+                    .await
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                let rows = sqlx::query(AssertSqlSafe(trimmed))
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                tx.rollback()
+                    .await
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                rows
+            } else {
+                sqlx::query(AssertSqlSafe(trimmed))
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(|e| AppError::Database(e.to_string()))?
+            };
             let mut columns = Vec::new();
             let mut column_types = Vec::new();
             if let Some(first) = rows_raw.first() {
@@ -333,7 +361,7 @@ impl DatabaseAdapter for MysqlAdapter {
                 notice: None,
             });
         }
-        let res = sqlx::raw_sql(trimmed)
+        let res = sqlx::raw_sql(AssertSqlSafe(trimmed))
             .execute(&self.pool)
             .await
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -379,7 +407,7 @@ impl DatabaseAdapter for MysqlAdapter {
                         cols.join(", "),
                         ph.join(", ")
                     );
-                    let mut q = sqlx::query(&sql);
+                    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
                     for v in values.values() {
                         q = bind_mysql(q, v);
                     }
@@ -413,7 +441,7 @@ impl DatabaseAdapter for MysqlAdapter {
                         sets.join(", "),
                         wheres.join(" AND ")
                     );
-                    let mut q = sqlx::query(&sql);
+                    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
                     for v in changes.values() {
                         q = bind_mysql(q, v);
                     }
@@ -422,9 +450,16 @@ impl DatabaseAdapter for MysqlAdapter {
                             q = bind_mysql(q, v);
                         }
                     }
-                    q.execute(&mut *tx)
+                    let affected = q
+                        .execute(&mut *tx)
                         .await
-                        .map_err(|e| AppError::Database(e.to_string()))?;
+                        .map_err(|e| AppError::Database(e.to_string()))?
+                        .rows_affected();
+                    if affected != 1 {
+                        return Err(AppError::BadRequest(
+                            "Baris telah berubah atau kunci tidak unik. Muat ulang tabel.".into(),
+                        ));
+                    }
                 }
                 StagedMutation::Delete { item, pk_match } => {
                     let table = validate_identifier(item).map_err(AppError::BadRequest)?;
@@ -443,15 +478,22 @@ impl DatabaseAdapter for MysqlAdapter {
                         quote_ident(&table, EngineKind::Mysql),
                         wheres.join(" AND ")
                     );
-                    let mut q = sqlx::query(&sql);
+                    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
                     for v in pk_match.values() {
                         if !matches!(v, CellValue::Null) {
                             q = bind_mysql(q, v);
                         }
                     }
-                    q.execute(&mut *tx)
+                    let affected = q
+                        .execute(&mut *tx)
                         .await
-                        .map_err(|e| AppError::Database(e.to_string()))?;
+                        .map_err(|e| AppError::Database(e.to_string()))?
+                        .rows_affected();
+                    if affected != 1 {
+                        return Err(AppError::BadRequest(
+                            "Baris telah berubah atau kunci tidak unik. Muat ulang tabel.".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -467,39 +509,76 @@ impl DatabaseAdapter for MysqlAdapter {
 
     async fn execute_ddl(&self, action: DdlAction) -> AppResult<DdlReport> {
         let sql = match action {
+            DdlAction::CopyTable {
+                source_table,
+                table_name,
+            } => {
+                let engine = EngineKind::Mysql;
+                let source = super::ddl_ident(&source_table, engine)?;
+                let target = super::ddl_ident(&table_name, engine)?;
+                let structure = self.inspect_structure(&source_table).await?;
+                let primary = structure
+                    .columns
+                    .iter()
+                    .filter(|c| c.is_pk)
+                    .map(|c| quote_ident(&c.name, engine))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let definition = if primary.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (PRIMARY KEY ({primary}))")
+                };
+                format!("CREATE TABLE {target}{definition} ENGINE=InnoDB AS SELECT * FROM {source}")
+            }
             DdlAction::CreateTable {
                 table_name,
                 columns,
             } => {
-                let vt = validate_identifier(&table_name).map_err(AppError::BadRequest)?;
-                let mut defs = Vec::new();
-                for c in columns {
-                    let vc = validate_identifier(&c.name).map_err(AppError::BadRequest)?;
-                    let mut line =
-                        format!("{} {}", quote_ident(&vc, EngineKind::Mysql), c.data_type);
-                    if c.is_pk {
-                        line.push_str(" PRIMARY KEY");
-                    } else if !c.nullable {
-                        line.push_str(" NOT NULL");
-                    }
-                    defs.push(line);
+                if columns.is_empty() {
+                    return Err(AppError::BadRequest("Tabel memerlukan kolom.".into()));
                 }
+                let definitions = columns
+                    .iter()
+                    .map(|c| super::column_definition(c, EngineKind::Mysql))
+                    .collect::<AppResult<Vec<_>>>()?;
                 format!(
-                    "CREATE TABLE {} ({});",
-                    quote_ident(&vt, EngineKind::Mysql),
-                    defs.join(", ")
+                    "CREATE TABLE {} ({})",
+                    ddl_ident(&table_name, EngineKind::Mysql)?,
+                    definitions.join(", ")
                 )
             }
-            DdlAction::AddColumn { table_name, column } => {
-                let vt = validate_identifier(&table_name).map_err(AppError::BadRequest)?;
-                let vc = validate_identifier(&column.name).map_err(AppError::BadRequest)?;
-                format!(
-                    "ALTER TABLE {} ADD COLUMN {} {};",
-                    quote_ident(&vt, EngineKind::Mysql),
-                    quote_ident(&vc, EngineKind::Mysql),
-                    column.data_type
-                )
-            }
+            DdlAction::RenameColumn {
+                table_name,
+                column_name,
+                new_name,
+            } => format!(
+                "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                ddl_ident(&table_name, EngineKind::Mysql)?,
+                ddl_ident(&column_name, EngineKind::Mysql)?,
+                ddl_ident(&new_name, EngineKind::Mysql)?
+            ),
+            DdlAction::DropColumn {
+                table_name,
+                column_name,
+            } => format!(
+                "ALTER TABLE {} DROP COLUMN {}",
+                ddl_ident(&table_name, EngineKind::Mysql)?,
+                ddl_ident(&column_name, EngineKind::Mysql)?
+            ),
+            DdlAction::RenameTable {
+                table_name,
+                new_name,
+            } => format!(
+                "ALTER TABLE {} RENAME TO {}",
+                ddl_ident(&table_name, EngineKind::Mysql)?,
+                ddl_ident(&new_name, EngineKind::Mysql)?
+            ),
+            DdlAction::AddColumn { table_name, column } => format!(
+                "ALTER TABLE {} ADD COLUMN {}",
+                ddl_ident(&table_name, EngineKind::Mysql)?,
+                super::column_definition(&column, EngineKind::Mysql)?
+            ),
             DdlAction::CreateIndex {
                 table_name,
                 index_name,
@@ -529,7 +608,7 @@ impl DatabaseAdapter for MysqlAdapter {
                 format!("DROP TABLE {};", quote_ident(&vt, EngineKind::Mysql))
             }
         };
-        sqlx::raw_sql(&sql)
+        sqlx::raw_sql(AssertSqlSafe(sql.as_str()))
             .execute(&self.pool)
             .await
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -539,11 +618,10 @@ impl DatabaseAdapter for MysqlAdapter {
         })
     }
 
-    async fn build_erd(&self) -> AppResult<ErdGraph> {
-        let items = self.list_items().await?;
+    async fn build_erd(&self, items: &[ItemInfo]) -> AppResult<ErdGraph> {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
-        for item in items.into_iter().filter(|i| i.item_type == "TABLE") {
+        for item in items.iter().filter(|i| i.item_type == "TABLE") {
             let st = self.inspect_structure(&item.name).await?;
             for fk in &st.foreign_keys {
                 edges.push(ErdEdge {

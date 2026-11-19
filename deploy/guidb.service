@@ -1,0 +1,19 @@
+[Unit]
+Description=GuiDB Studio
+
+[Service]
+WorkingDirectory=%h/guidb
+ExecStartPre=/bin/sh -c 'test -n "$$GUIDB_ADMIN_PASSWORD"'
+ExecStart=%h/.local/share/guidb/guidb-server
+Environment=GUIDB_ADDR=127.0.0.1:8788
+Environment=GUIDB_STATIC_DIR=%h/.local/share/guidb/static
+EnvironmentFile=%h/.config/guidb/admin.env
+UMask=0077
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

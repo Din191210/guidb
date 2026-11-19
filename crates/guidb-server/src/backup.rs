@@ -4,12 +4,13 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use guidb_shared::sql_gen::{format_sql_literal, quote_ident};
 use guidb_shared::{
-    BackupDashboardResponse, BackupKind, BackupRecord, BackupSchedule, BackupScope, CellValue,
+    BackupDashboardResponse, BackupKind, BackupRecord, BackupSchedule, BackupScope,
     CreateConnectionRequest, CreateScheduleRequest, DataModel, EngineKind, EnvironmentKind,
     ProtectionMode, RestoreBackupRequest, RestoreBackupResponse, VerifyBackupResponse,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::AssertSqlSafe;
 use sqlx::Row;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -108,6 +109,17 @@ pub async fn create_backup(
     scope: BackupScope,
     label: Option<String>,
 ) -> AppResult<BackupRecord> {
+    create_backup_record(state, conn_id, kind, scope, label, None).await
+}
+
+async fn create_backup_record(
+    state: &AppState,
+    conn_id: &str,
+    kind: BackupKind,
+    scope: BackupScope,
+    label: Option<String>,
+    schedule_id: Option<&str>,
+) -> AppResult<BackupRecord> {
     let conn = catalog::get_connection(&state.catalog_pool, conn_id).await?;
     let adapter = resolve_adapter(state, &conn).await?;
     let items = adapter.list_items().await?;
@@ -134,7 +146,43 @@ pub async fn create_backup(
     let mut total_rows = 0_usize;
     let object_count = items.len();
 
-    let (ext, bytes) = if conn.engine.model() == DataModel::Relational {
+    let (ext, bytes) = if conn.engine == EngineKind::Sqlite
+        && scope == BackupScope::FullSchemaAndData
+    {
+        let pool = crate::drivers::get_or_open_sqlite(state, &conn).await?;
+        let snapshot = dir.join(format!("{id}.snapshot"));
+        sqlx::query("VACUUM INTO ?")
+            .bind(snapshot.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let bytes = std::fs::read(&snapshot).map_err(anyhow::Error::from)?;
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&snapshot)
+            .read_only(true);
+        let copy = sqlx::SqlitePool::connect_with(options)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .fetch_all(&copy)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        for table in tables {
+            let query = format!(
+                "SELECT COUNT(*) FROM {}",
+                quote_ident(&table, EngineKind::Sqlite)
+            );
+            total_rows += sqlx::query_scalar::<_, i64>(AssertSqlSafe(query.as_str()))
+                .fetch_one(&copy)
+                .await
+                .map_err(|e| AppError::Database(e.to_string()))? as usize;
+        }
+        copy.close().await;
+        std::fs::remove_file(snapshot).map_err(anyhow::Error::from)?;
+        ("sqlite", bytes)
+    } else if conn.engine.model() == DataModel::Relational {
         let mut sql = String::new();
         sql.push_str(&format!(
             "-- GuiDB Studio Backup\n-- Connection: {} ({})\n-- Scope: {}\n-- Created: {}\n\n",
@@ -241,45 +289,63 @@ pub async fn create_backup(
         }
         ("sql", sql.into_bytes())
     } else {
+        if conn.target.starts_with("redis://") {
+            return Err(AppError::BadRequest(
+                "Gunakan snapshot RDB native untuk backup Redis eksternal.".into(),
+            ));
+        }
+        let pool = crate::drivers::get_or_open_sqlite(state, &conn).await?;
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
         let mut collections = BTreeMap::new();
-        for item in &items {
-            if conn.engine == EngineKind::Redis && item.name != "*" {
-                continue;
-            }
-            let chunk = adapter
-                .fetch_item_data(
-                    &item.name,
-                    DataQueryOptions {
-                        filter: None,
-                        sort_col: None,
-                        sort_dir: None,
-                        limit: 500,
-                        offset: 0,
-                    },
-                )
-                .await?;
-            let mut records = Vec::new();
+        if conn.engine == EngineKind::Redis {
+            let mut keys = Vec::new();
             if scope == BackupScope::FullSchemaAndData {
-                for row in &chunk.rows {
-                    let mut map = serde_json::Map::new();
-                    for (col, cell) in chunk.columns.iter().zip(row.iter()) {
-                        let v = match cell {
-                            CellValue::Null => serde_json::Value::Null,
-                            CellValue::Bool(b) => serde_json::Value::Bool(*b),
-                            CellValue::Int(i) => serde_json::json!(i),
-                            CellValue::Float(f) => serde_json::json!(f),
-                            CellValue::Text(s) => serde_json::Value::String(s.clone()),
-                            CellValue::Json(j) => j.clone(),
-                            CellValue::Bytes(b) => serde_json::Value::String(b.clone()),
-                        };
-                        map.insert(col.clone(), v);
-                    }
-                    records.push(map);
-                    total_rows += 1;
+                for row in sqlx::query(
+                    "SELECT key, data_type, value_text, CASE WHEN ttl_seconds < 0 THEN -1 ELSE max(0, ttl_seconds - CAST((julianday('now') - julianday(updated_at))*86400 AS INTEGER)) END AS ttl_seconds FROM _guidb_kv WHERE ttl_seconds < 0 OR (julianday('now') - julianday(updated_at))*86400 < ttl_seconds ORDER BY key",
+                )
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|e| AppError::Database(e.to_string()))?
+                {
+                    let record = serde_json::Map::from_iter([
+                        ("key".into(), row.get::<String, _>("key").into()),
+                        ("data_type".into(), row.get::<String, _>("data_type").into()),
+                        ("value".into(), row.get::<String, _>("value_text").into()),
+                        (
+                            "ttl_seconds".into(),
+                            row.get::<i64, _>("ttl_seconds").into(),
+                        ),
+                    ]);
+                    keys.push(record);
                 }
             }
-            collections.insert(item.name.clone(), records);
+            total_rows = keys.len();
+            collections.insert("*".into(), keys);
+        } else {
+            let names: Vec<String> =
+                sqlx::query_scalar("SELECT name FROM _guidb_collections ORDER BY name")
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+            for name in names {
+                let mut docs = Vec::new();
+                if scope == BackupScope::FullSchemaAndData {
+                    for row in sqlx::query("SELECT doc_id, doc_json FROM _guidb_documents WHERE collection = ? ORDER BY doc_id").bind(&name).fetch_all(&mut *tx).await.map_err(|e| AppError::Database(e.to_string()))? {
+                        let mut doc: serde_json::Map<String, serde_json::Value> = serde_json::from_str(row.get("doc_json")).map_err(|e| AppError::Database(format!("Invalid document: {e}")))?;
+                        doc.insert("_id".into(), row.get::<String,_>("doc_id").into());
+                        docs.push(doc);
+                    }
+                }
+                total_rows += docs.len();
+                collections.insert(name, docs);
+            }
         }
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
         let bundle = NosqlBackupBundle {
             engine: conn.engine,
             source_connection: conn.name.clone(),
@@ -291,9 +357,19 @@ pub async fn create_backup(
         ("json", json_bytes)
     };
 
-    let file_name = format!("{safe_slug}_{stamp}_{}.{ext}", &id[..8]);
+    let file_name = format!("{safe_slug}_{stamp}_{id}.{ext}");
     let file_path = dir.join(&file_name);
-    std::fs::write(&file_path, &bytes).map_err(|e| AppError::Database(e.to_string()))?;
+    let temp = file_path.with_extension("part");
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create_new(&temp).map_err(anyhow::Error::from)?;
+        file.write_all(&bytes).map_err(anyhow::Error::from)?;
+        file.sync_all().map_err(anyhow::Error::from)?;
+    }
+    std::fs::rename(&temp, &file_path).map_err(anyhow::Error::from)?;
+    std::fs::File::open(&dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(anyhow::Error::from)?;
     let file_size_bytes = bytes.len() as u64;
     let sha256 = sha256_hex(&bytes);
     let final_label = label
@@ -311,8 +387,8 @@ pub async fn create_backup(
         });
 
     sqlx::query(
-        "INSERT INTO backup_records (id, connection_id, connection_name, engine, kind, scope, label, file_name, file_size_bytes, sha256, object_count, row_count, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO backup_records (id, connection_id, connection_name, engine, kind, scope, label, file_name, file_size_bytes, sha256, object_count, row_count, created_at, schedule_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )
     .bind(&id)
     .bind(&conn.id)
@@ -327,6 +403,7 @@ pub async fn create_backup(
     .bind(object_count as i64)
     .bind(total_rows as i64)
     .bind(&created_at)
+    .bind(schedule_id)
     .execute(&state.catalog_pool)
     .await
     .map_err(|e| AppError::Database(e.to_string()))?;
@@ -434,17 +511,13 @@ pub async fn restore_backup_isolated(
     backup_id: &str,
     req: RestoreBackupRequest,
 ) -> AppResult<RestoreBackupResponse> {
-    let verify = verify_backup(state, backup_id).await?;
-    if !verify.valid {
-        return Err(AppError::Database(
-            "Restore dibatalkan: integritas checksum SHA-256 backup gagal.".into(),
-        ));
-    }
-
     let rec = get_backup_record(state, backup_id).await?;
     let (_, bytes) = get_backup_file_content(state, backup_id).await?;
+    if sha256_hex(&bytes) != rec.sha256 {
+        return Err(AppError::Database("Checksum backup tidak cocok.".into()));
+    }
     let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-    let short_id = &Uuid::new_v4().simple().to_string()[..6];
+    let short_id = Uuid::new_v4().simple();
     let target_file = format!("restored_{stamp}_{short_id}.sqlite");
     let resolved = state.data_dir.join(&target_file);
     let conn_name = req
@@ -455,6 +528,26 @@ pub async fn restore_backup_isolated(
         .map(str::to_string)
         .unwrap_or_else(|| format!("Restored: {} ({stamp})", rec.connection_name));
 
+    if rec.file_name.ends_with(".sqlite") {
+        std::fs::write(&resolved, bytes).map_err(anyhow::Error::from)?;
+        let connection = catalog::create_connection(
+            state,
+            CreateConnectionRequest {
+                name: conn_name,
+                engine: EngineKind::Sqlite,
+                environment: EnvironmentKind::Local,
+                target: target_file,
+                protection_mode: Some(ProtectionMode::SafeGuard),
+            },
+        )
+        .await?;
+        return Ok(RestoreBackupResponse {
+            connection,
+            restored_statements: 0,
+            message: "Snapshot SQLite berhasil dipulihkan ke database baru.".into(),
+        });
+    }
+
     if rec.file_name.ends_with(".sql") {
         let sql_text = String::from_utf8(bytes).map_err(|e| AppError::Database(e.to_string()))?;
         let pool = catalog::open_sqlite_pool(&resolved)
@@ -462,8 +555,8 @@ pub async fn restore_backup_isolated(
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         // Convert PostgreSQL/MySQL transaction keywords or execute statements cleanly
-        let clean_sql = sql_text.replace("AUTO_INCREMENT", "AUTOINCREMENT");
-        sqlx::raw_sql(&clean_sql)
+        let clean_sql = sql_text;
+        sqlx::raw_sql(AssertSqlSafe(clean_sql.as_str()))
             .execute(&pool)
             .await
             .map_err(|e| AppError::Database(format!("Isolated restore SQL failed: {e}")))?;
@@ -505,19 +598,12 @@ pub async fn restore_backup_isolated(
         EngineKind::MongoDb
     };
 
-    let conn = catalog::create_connection(
-        state,
-        CreateConnectionRequest {
-            name: conn_name,
-            engine: target_engine,
-            environment: EnvironmentKind::Local,
-            target: target_file,
-            protection_mode: Some(ProtectionMode::SafeGuard),
-        },
-    )
-    .await?;
-
     let pool = catalog::open_sqlite_pool(&resolved)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    catalog::ensure_store_schema(&pool, target_engine).await?;
+    let mut tx = pool
+        .begin()
         .await
         .map_err(|e| AppError::Database(e.to_string()))?;
     let mut restored = 0_usize;
@@ -530,7 +616,7 @@ pub async fn restore_backup_isolated(
             )
             .bind(&col_name)
             .bind(&now)
-            .execute(&pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| AppError::Database(e.to_string()))?;
             for doc in docs {
@@ -547,7 +633,7 @@ pub async fn restore_backup_isolated(
                 .bind(doc_id)
                 .bind(json_str)
                 .bind(&now)
-                .execute(&pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?;
                 restored += 1;
@@ -585,14 +671,28 @@ pub async fn restore_backup_isolated(
                 .bind(ttl)
                 .bind(val.len() as i64)
                 .bind(&now)
-                .execute(&pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?;
                 restored += 1;
             }
         }
     }
+    tx.commit()
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
     pool.close().await;
+    let conn = catalog::create_connection(
+        state,
+        CreateConnectionRequest {
+            name: conn_name,
+            engine: target_engine,
+            environment: EnvironmentKind::Local,
+            target: target_file,
+            protection_mode: Some(ProtectionMode::SafeGuard),
+        },
+    )
+    .await?;
 
     Ok(RestoreBackupResponse {
         connection: conn,
@@ -671,18 +771,49 @@ pub async fn delete_schedule(state: &AppState, id: &str) -> AppResult<()> {
 }
 
 pub async fn run_schedule_now(state: &AppState, id: &str) -> AppResult<BackupRecord> {
+    run_schedule(state, id, None)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Jadwal sedang dijalankan.".into()))
+}
+
+async fn run_schedule(
+    state: &AppState,
+    id: &str,
+    expected_due: Option<&str>,
+) -> AppResult<Option<BackupRecord>> {
     let schedules = list_schedules(state).await?;
     let sched = schedules
         .into_iter()
         .find(|s| s.id == id)
         .ok_or_else(|| AppError::NotFound(format!("Schedule '{id}' not found")))?;
 
-    let record = create_backup(
+    let locks = state.data_dir.join("schedule-locks");
+    std::fs::create_dir_all(&locks).map_err(anyhow::Error::from)?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(locks.join(sha256_hex(id.as_bytes())))
+        .map_err(anyhow::Error::from)?;
+    match file.try_lock() {
+        Ok(()) => (),
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => return Err(anyhow::Error::from(e).into()),
+    }
+    if let Some(due) = expected_due {
+        let still_due: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM backup_schedules WHERE id=? AND enabled=1 AND next_run_at=?)")
+            .bind(id).bind(due).fetch_one(&state.catalog_pool).await.map_err(|e| AppError::Database(e.to_string()))?;
+        if !still_due {
+            return Ok(None);
+        }
+    }
+    let record = create_backup_record(
         state,
         &sched.connection_id,
         BackupKind::Scheduled,
         sched.scope,
         Some(format!("Scheduled ({}m)", sched.interval_minutes)),
+        Some(id),
     )
     .await?;
 
@@ -696,17 +827,17 @@ pub async fn run_schedule_now(state: &AppState, id: &str) -> AppResult<BackupRec
         .await
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-    prune_old_scheduled_backups(state, &sched.connection_id, sched.retention_count).await;
-    Ok(record)
+    prune_old_scheduled_backups(state, id, sched.retention_count).await;
+    Ok(Some(record))
 }
 
-async fn prune_old_scheduled_backups(state: &AppState, conn_id: &str, retention_count: i64) {
+async fn prune_old_scheduled_backups(state: &AppState, schedule_id: &str, retention_count: i64) {
     let rows = sqlx::query(
         "SELECT id, file_name FROM backup_records
-         WHERE connection_id = ?1 AND kind = 'scheduled'
+         WHERE schedule_id = ?1 AND kind = 'scheduled'
          ORDER BY created_at DESC",
     )
-    .bind(conn_id)
+    .bind(schedule_id)
     .fetch_all(&state.catalog_pool)
     .await
     .unwrap_or_default();
@@ -715,7 +846,12 @@ async fn prune_old_scheduled_backups(state: &AppState, conn_id: &str, retention_
         let old_id: String = old.get("id");
         let file_name: String = old.get("file_name");
         if let Ok(p) = sanitize_backup_path(state, &file_name) {
-            let _ = std::fs::remove_file(p);
+            if let Err(error) = std::fs::remove_file(p) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(%error, %old_id, "Cannot prune backup");
+                    continue;
+                }
+            }
         }
         let _ = sqlx::query("DELETE FROM backup_records WHERE id = ?1")
             .bind(old_id)
@@ -730,16 +866,16 @@ pub fn spawn_backup_scheduler(state: AppState) {
         loop {
             ticker.tick().await;
             let now_str = chrono::Utc::now().to_rfc3339();
-            let due_ids: Vec<String> = sqlx::query_scalar(
-                "SELECT id FROM backup_schedules WHERE enabled = 1 AND next_run_at <= ?1",
+            let due_ids: Vec<(String, String)> = sqlx::query_as(
+                "SELECT id, next_run_at FROM backup_schedules WHERE enabled = 1 AND next_run_at <= ?1",
             )
             .bind(&now_str)
             .fetch_all(&state.catalog_pool)
             .await
             .unwrap_or_default();
 
-            for sched_id in due_ids {
-                if let Err(err) = run_schedule_now(&state, &sched_id).await {
+            for (sched_id, due) in due_ids {
+                if let Err(err) = run_schedule(&state, &sched_id, Some(&due)).await {
                     tracing::warn!(schedule_id = %sched_id, error = ?err, "Scheduled backup failed");
                 }
             }
